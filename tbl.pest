@@ -1,0 +1,30 @@
+program   = _{ SOI ~ task* ~ schedule ~ EOI }
+task      = { "task" ~ ident ~ "(" ~ arg_list ~ ")" ~ "{" ~ task_body ~ "}" }
+task_body = _{ "state:" ~ "{" ~ struct_def ~ "}" ~ "enter:" ~ body ~ "repeat: " ~ body ~ "exit:" ~ body }
+
+schedule = { "schedule" ~ ident ~ body }
+
+arg      =  { ident ~ ":" ~ ident }
+arg_list = _{ (arg ~ ",")* ~ arg? }
+struct_def = { arg_list }
+
+body                =  { "{" ~ expression* ~ "}" }
+expression          =  { var_assign | conditional | call | builtin_operation | value | exit }
+value               =  { var | literal }
+var                 =  { ident ~ "." ~ ident | ident }
+literal             =  { num | string }
+num                 =  { (ASCII_DIGIT)+ }
+string              = @{ "\"" ~ ANY* ~ "\"" }
+var_assign          =  { var ~ "=" ~ value }
+conditional         =  { "if" ~ expression ~ body ~ "else" ~ body }
+builtin_operation   =  { unary_operator ~ value | value ~ binary_operator ~ value }
+unary_operator      =  { "-" | "+" | "!" }
+binary_operator     =  { "+" | "-" | "*" | "/" | "<" | ">" | "<=" | ">=" | "==" | "!=" | "&&" | "|" }
+call                =  { ident ~ "(" ~ call_args ~ ")" }
+call_args           =  { (value ~ ",")* ~ value? }
+exit                =  { "exit" }
+
+ident = @{ (ASCII_ALPHA | "_")+ ~ (ASCII_ALPHANUMERIC | "_")* }
+
+WHITESPACE = _{ WHITE_SPACE | NEWLINE }
+COMMENT    = _{ "//" ~ ANY* ~ NEWLINE }
