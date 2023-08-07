@@ -1,5 +1,3 @@
-use std::string::ParseError;
-
 #[derive(Debug)]
 pub enum AstNode {
     Task(Task),
@@ -10,6 +8,7 @@ pub enum AstNode {
 pub struct Task {
     pub name: String,
     pub arguments: Vec<Argument>,
+    pub state: Vec<Argument>,
     pub enter: Body,
     pub repeat: Body,
     pub exit: Body,
@@ -65,12 +64,12 @@ pub enum Expression {
     Exit,
     BinaryOperation {
         operator: BinaryOperator,
-        left: TblValue,
-        right: TblValue,
+        left: Box<Expression>,
+        right: Box<Expression>,
     },
     UnaryOperation {
         operator: UnaryOperator,
-        value: TblValue,
+        value: Box<Expression>,
     },
     Conditional {
         condition: Box<Expression>,
@@ -79,7 +78,11 @@ pub enum Expression {
     },
     VarAssign {
         var: String,
-        value: TblValue,
+        value: Box<Expression>,
+    },
+    Call {
+        function: String,
+        arguments: Vec<Expression>,
     },
 }
 
@@ -88,6 +91,23 @@ pub enum UnaryOperator {
     Plus,
     Minus,
     Not,
+    Ref,
+    Deref,
+}
+
+impl TryFrom<&str> for UnaryOperator {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "+" => Ok(Self::Plus),
+            "-" => Ok(Self::Minus),
+            "!" => Ok(Self::Not),
+            "&" => Ok(Self::Ref),
+            "*" => Ok(Self::Deref),
+            _ => Err(format!("`{value}` is not a unary operator")),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -106,14 +126,31 @@ pub enum BinaryOperator {
     Or,
 }
 
-#[derive(Debug)]
-pub enum TblValue {
-    Variable(String),
-    Literal(Literal),
+impl TryFrom<&str> for BinaryOperator {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "+" => Ok(BinaryOperator::Plus),
+            "-" => Ok(BinaryOperator::Minus),
+            "*" => Ok(BinaryOperator::Times),
+            "/" => Ok(BinaryOperator::Divide),
+            "<" => Ok(BinaryOperator::Less),
+            "<=" => Ok(BinaryOperator::LessEqual),
+            "==" => Ok(BinaryOperator::Equal),
+            "!=" => Ok(BinaryOperator::Unequal),
+            ">" => Ok(BinaryOperator::Greater),
+            ">=" => Ok(BinaryOperator::GreaterEqual),
+            "&&" => Ok(BinaryOperator::And),
+            "||" => Ok(BinaryOperator::Or),
+            _ => Err(format!("`{value}` is not a valid binary operator")),
+        }
+    }
 }
 
 #[derive(Debug)]
-pub enum Literal {
+pub enum TblValue {
+    Variable(String),
     Int(u64),
     String(String),
 }
