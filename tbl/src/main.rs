@@ -1,8 +1,11 @@
 mod ast;
+mod codegen;
 mod parse;
 
 use ariadne::{Label, Report, Source};
 
+use codegen::CodeGen;
+use inkwell::context::Context;
 use parse::parse;
 
 fn main() -> color_eyre::Result<()> {
@@ -11,7 +14,11 @@ fn main() -> color_eyre::Result<()> {
     let input = std::fs::read_to_string(&input_path)?;
     match parse(&input) {
         Ok(ast) => {
-            dbg!(ast);
+            let context = Context::create();
+            let module = context.create_module(&input_path);
+            let builder = context.create_builder();
+            let mut codegen = CodeGen::new(&context, module, builder);
+            codegen.compile(ast);
         }
         Err(err) => match err.location {
             pest::error::InputLocation::Pos(pos) => {

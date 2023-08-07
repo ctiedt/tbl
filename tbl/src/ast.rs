@@ -1,3 +1,5 @@
+pub type Program = Vec<AstNode>;
+
 #[derive(Debug)]
 pub enum AstNode {
     Task(Task),
@@ -20,7 +22,7 @@ pub struct Schedule {
     pub body: Body,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum TblType {
     U8,
     U16,
