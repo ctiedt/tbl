@@ -1,3 +1,19 @@
-[workspace]
-members = ["tbl", "tbl_parser"]
-resolver = "2"
+[package]
+name = "better_tbl"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = { version = "4.4.7", features = ["derive"] }
+cranelift = "0.101.4"
+cranelift-module = "0.101.4"
+cranelift-object = "0.101.4"
+miette = { version = "5.10.0", features = ["fancy"] }
+pest = "2.7.5"
+pest_derive = { version = "2.7.5", features = ["grammar-extras"] }
+target-lexicon = "0.12.12"
+thiserror = "1.0.50"
+tracing = "0.1.40"
+tracing-subscriber = "0.3.17"

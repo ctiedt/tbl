@@ -1,29 +1,51 @@
-program   = _{ SOI ~ task* ~ schedule ~ EOI }
-task      =  { "task" ~ ident ~ "(" ~ arg_list ~ ")" ~ "{" ~ task_body ~ "}" }
-task_body = _{ "state:" ~ "{" ~ struct_def ~ "}" ~ "enter:" ~ body ~ "repeat: " ~ body ~ "exit:" ~ body }
+program = { SOI ~ decl* ~ EOI }
 
-schedule = { "schedule" ~ ident ~ body }
+decl = { task | extern_task }
 
-arg        =  { ident ~ ":" ~ ident }
-arg_list   = _{ (arg ~ ",")* ~ arg? }
-struct_def =  { arg_list }
+extern_task = { "extern" ~ "task" ~ (#name = ident) ~ "(" ~ arg_list? ~ ")" ~ ("->" ~ #returns = ident)? ~ ";" }
 
-body              =  { "{" ~ statement* ~ "}" }
-statement         =  { (var_assign | "exit" | expression) ~ ";" | conditional }
-expression        =  { call | builtin_operation | var | num | string }
-value             =  { var | num | string | call }
-var               =  { ident ~ "." ~ ident | ident }
-num               =  { (ASCII_DIGIT)+ }
-string            = @{ "\"" ~ ANY* ~ "\"" }
-var_assign        =  { var ~ "=" ~ expression }
-conditional       =  { "if" ~ expression ~ body ~ "else" ~ body }
-builtin_operation =  { unary_operator ~ expression | value ~ (binary_operator ~ expression)* }
-unary_operator    =  { "-" | "+" | "!" | "&" | "*" }
-binary_operator   =  { "+" | "-" | "*" | "/" | "<" | ">" | "<=" | ">=" | "==" | "!=" | "&&" | "|" }
-call              =  { ident ~ "(" ~ call_args ~ ")" }
-call_args         = _{ (expression ~ ",")* ~ expression? }
+task = { "task" ~ (#name = ident) ~ "(" ~ arg_list? ~ ")" ~ ("->" ~ #returns = ident)? ~ "{" ~ (#body = statement)* ~ "}" }
+
+arg_list = _{ (#arg = ident ~ ":" ~ #type = type ~ ",")* ~ (#arg = ident ~ ":" ~ #type = type) }
 
 ident = @{ (ASCII_ALPHA | "_")+ ~ (ASCII_ALPHANUMERIC | "_")* }
 
+type = @{ "&"* ~ ident }
+
+statement = { #cond = conditional | (#var_decl = var_decl | (#return = return) | #sched = ("schedule" ~ call) | #exit = exit | (#expr = expression)) ~ ";" }
+exit = { "exit" }
+return = { "return" ~ expression? }
+var_decl = { "var " ~ #name = ident ~ ":" ~ #type = ident ~ "=" ~ #value = expression }
+
+conditional = { "if" ~ expression ~ "{" ~ #then = statement* ~ "}" ~ ("else" ~ (("{" ~ #else = statement* ~ "}") | conditional))? }
+
+expression = { #call = call | equality }
+
+equality = { comparison ~ (eq_op ~ comparison)* }
+eq_op = {"==" | "!="}
+
+comparison = { term ~ (cmp_op ~ term)* }
+cmp_op = { ">" | ">=" | "<" | "<=" | "&&" | "||"}
+
+term = { factor ~ (add_op ~ factor)* }
+add_op = {"-" | "+"}
+
+factor = { unary ~ (mul_op ~ unary)* }
+mul_op = { "/" | "*" }
+
+unary = { un_op ~ unary | primary }
+un_op = { "!" | "-" | "*" | "&" }
+
+primary = { value | ident | "(" ~ expression ~ ")" }
+
+call = { #task = ident ~ "(" ~ param_list? ~ ")" }
+
+param_list = _{ (#arg = expression ~ ",")* ~ #arg = expression }
+
+value = { string | #int = ASCII_DIGIT+ | #bool = ("true" | "false") }
+
+string = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+
 WHITESPACE = _{ WHITE_SPACE | NEWLINE }
-COMMENT    = _{ "//" ~ ANY* ~ NEWLINE }
+
+COMMENT = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" | "//" ~ (!NEWLINE ~ ANY)* ~ NEWLINE }

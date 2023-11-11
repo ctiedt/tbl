@@ -1,0 +1,5 @@
+task main() {
+    //print("Hello world");
+    8;
+    return;
+}

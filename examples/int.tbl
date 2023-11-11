@@ -1,0 +1,12 @@
+extern task print();
+
+task add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+
+task main() {
+    var a: u32 = 1;
+    var b: u32 = 2;
+    var c: u32 = add(a, b);
+    print(c);
+}

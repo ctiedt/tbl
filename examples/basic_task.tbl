@@ -1,0 +1,9 @@
+task say_hello() {
+    print("Hello\n");
+    1 + 2;
+    true;
+}
+
+task main() {
+    schedule say_hello();
+}
