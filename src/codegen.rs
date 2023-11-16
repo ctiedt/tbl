@@ -407,7 +407,21 @@ impl CodeGen {
                     crate::ast::BinaryOperator::Divide => Ok(builder.ins().sdiv(left, right)),
                 }
             }
-            Expression::UnaryOperation { value, operator } => todo!(),
+            Expression::UnaryOperation { value, operator } => {
+                let ty = self.type_of(ctx, value);
+                let val = self.compile_expr(builder, type_hint, value)?;
+                match operator {
+                    crate::ast::UnaryOperator::Not => Ok(builder.ins().bnot(val)),
+                    crate::ast::UnaryOperator::Minus => {
+                        let zero = builder.ins().iconst(
+                            self.to_cranelift_type(&ty.unwrap())
+                                .ok_or(miette!("Expression has no known type"))?,
+                            0,
+                        );
+                        Ok(builder.ins().isub(zero, val))
+                    }
+                }
+            }
         }
     }
 
