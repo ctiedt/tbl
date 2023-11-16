@@ -1,12 +1,13 @@
-extern task print();
+extern task putchar(c: u32);
 
 task add(a: u32, b: u32) -> u32 {
     return a + b;
 }
 
-task main() {
+task main() -> u32 {
     var a: u32 = 1;
     var b: u32 = 2;
     var c: u32 = add(a, b);
-    print(c);
+    putchar(48 + c);
+    return 0;
 }

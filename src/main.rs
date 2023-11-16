@@ -54,7 +54,7 @@ fn main() -> miette::Result<()> {
     tracing::subscriber::set_global_default(FmtSubscriber::builder().pretty().finish())
         .into_diagnostic()?;
 
-    let source_file = std::fs::read_to_string(args.file).into_diagnostic()?;
+    let source_file = std::fs::read_to_string(&args.file).into_diagnostic()?;
     let parsed = TblParser::parse(Rule::program, &source_file)
         .into_diagnostic()?
         .next()
@@ -69,7 +69,14 @@ fn main() -> miette::Result<()> {
         .finish(shared_flags)
         .into_diagnostic()?;
 
-    let codegen = CodeGen::new(target)?;
+    let codegen = CodeGen::new(
+        args.file
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+        target,
+    )?;
     codegen.compile(program)?;
     Ok(())
 }

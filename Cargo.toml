@@ -1,5 +1,5 @@
 [package]
-name = "better_tbl"
+name = "tbl"
 version = "0.1.0"
 edition = "2021"
 
