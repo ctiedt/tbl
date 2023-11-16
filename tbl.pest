@@ -12,14 +12,15 @@ ident = @{ (ASCII_ALPHA | "_")+ ~ (ASCII_ALPHANUMERIC | "_")* }
 
 type = @{ "&"* ~ ident }
 
-statement = { #cond = conditional | (#var_decl = var_decl | (#return = return) | #sched = ("schedule" ~ call) | #exit = exit | (#expr = expression)) ~ ";" }
+statement = { #cond = conditional | (#var_decl = var_decl | #var_assign = var_assign | (#return = return) | #sched = ("schedule" ~ call) | #exit = exit | (#expr = expression)) ~ ";" }
 exit = { "exit" }
 return = { "return" ~ expression? }
-var_decl = { "var " ~ #name = ident ~ ":" ~ #type = ident ~ "=" ~ #value = expression }
+var_decl = { "var " ~ #name = ident ~ ":" ~ #type = type ~ "=" ~ #value = expression }
+var_assign = { #name = ident ~ "=" ~ #value = expression }
 
-conditional = { "if" ~ expression ~ "{" ~ #then = statement* ~ "}" ~ ("else" ~ (("{" ~ #else = statement* ~ "}") | conditional))? }
+conditional = { "if" ~ (#test = expression) ~ "{" ~ #then = statement* ~ "}" ~ ("else" ~ (("{" ~ #else = statement* ~ "}") | conditional))? }
 
-expression = { #call = call | equality }
+expression = { equality }
 
 equality = { comparison ~ (eq_op ~ comparison)* }
 eq_op = {"==" | "!="}
@@ -36,13 +37,13 @@ mul_op = { "/" | "*" }
 unary = { un_op ~ unary | primary }
 un_op = { "!" | "-" | "*" | "&" }
 
-primary = { value | ident | "(" ~ expression ~ ")" }
+primary = { call | value | ident | "(" ~ expression ~ ")" }
 
 call = { #task = ident ~ "(" ~ param_list? ~ ")" }
 
 param_list = _{ (#arg = expression ~ ",")* ~ #arg = expression }
 
-value = { string | #int = ASCII_DIGIT+ | #bool = ("true" | "false") }
+value = { string | #int = ASCII_DIGIT+ | #bool = ("true" | "false") | "'" ~ #char = (ASCII) ~ "'" }
 
 string = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
 

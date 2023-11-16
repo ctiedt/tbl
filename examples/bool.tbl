@@ -1,0 +1,9 @@
+extern task putchar(c: u32);
+
+task main() {
+    var b: bool = true;
+    var b2: bool = false;
+    b = false;
+    var x: i8 = 32;
+    return;
+}

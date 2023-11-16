@@ -1,0 +1,11 @@
+extern task putchar(c: u8);
+extern task printf(template: &u8, v: u32);
+
+task main() {
+    var s: &u8 = "ABC\n";
+    printf(s, 0);
+    printf("%d\n", 42);
+    //var c: u8 = 'A';
+    //putchar(c);
+    return;
+}

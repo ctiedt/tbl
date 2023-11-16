@@ -1,0 +1,15 @@
+extern task putchar(n: u32);
+
+task fac(n: u32) -> u32 {
+    if (n == 0) {
+        return 1;
+    } else {
+        return n * fac(n - 1);
+    }
+}
+
+task main() -> u32 {
+    var n: u32 = 5;
+    var m: u32 = fac(n);
+    return m;
+}

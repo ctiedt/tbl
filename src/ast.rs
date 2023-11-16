@@ -34,6 +34,11 @@ pub enum Declaration {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Statement {
+    Conditional {
+        test: Expression,
+        then: Vec<Statement>,
+        else_: Vec<Statement>,
+    },
     Exit,
     Expression(Expression),
     Return(Option<Expression>),
@@ -46,6 +51,10 @@ pub enum Statement {
         type_: String,
         value: Expression,
     },
+    VarAssign {
+        name: String,
+        value: Expression,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +65,6 @@ pub enum Expression {
         task: String,
         args: Vec<Expression>,
     },
-
     BinaryOperation {
         left: Box<Expression>,
         right: Box<Expression>,
@@ -204,6 +212,23 @@ pub fn parse_stmt(tokens: Pair<'_, Rule>) -> miette::Result<Statement> {
         .ok_or(miette!("Statement should contain one inner pair"))?;
 
     match pair.as_node_tag() {
+        Some("cond") => {
+            let pairs = pair.into_inner();
+            let test = parse_expr(
+                pairs
+                    .find_first_tagged("test")
+                    .ok_or(miette!("Condition has no test"))?,
+            )?;
+            let then: miette::Result<Vec<Statement>> =
+                pairs.clone().find_tagged("then").map(parse_stmt).collect();
+            let else_: miette::Result<Vec<Statement>> =
+                pairs.clone().find_tagged("else").map(parse_stmt).collect();
+            Ok(Statement::Conditional {
+                test,
+                then: then?,
+                else_: else_?,
+            })
+        }
         Some("sched") => {
             let pairs = pair.into_inner();
             let task = pairs
@@ -250,6 +275,24 @@ pub fn parse_stmt(tokens: Pair<'_, Rule>) -> miette::Result<Statement> {
             )?;
             Ok(Statement::VarDecl { name, type_, value })
         }
+        Some("var_assign") => {
+            let inner = pair.into_inner();
+            let name = inner
+                .find_first_tagged("name")
+                .ok_or(miette!("Variable has no name"))?
+                .as_str()
+                .to_string();
+
+            let value = parse_expr(
+                inner
+                    .find_first_tagged("value")
+                    .ok_or(miette!("Variable has no value"))?
+                    .into_inner()
+                    .next()
+                    .ok_or(miette!("Variable value should contain a pair"))?,
+            )?;
+            Ok(Statement::VarAssign { name, value })
+        }
         Some(t) => Err(miette!("Unknown tag for statement `{t}`")),
         None => Err(miette!("Statement `{}` is untagged", pair.as_str())),
     }
@@ -257,22 +300,7 @@ pub fn parse_stmt(tokens: Pair<'_, Rule>) -> miette::Result<Statement> {
 
 pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
     match tokens.as_node_tag() {
-        Some("call") => {
-            let pairs = tokens.into_inner();
-            let task = pairs
-                .find_first_tagged("task")
-                .ok_or(miette!("Task has no name"))?
-                .as_str()
-                .to_string();
-            let args: miette::Result<Vec<Expression>> = pairs
-                .clone()
-                .find_tagged("arg")
-                .map(|p| parse_expr(p.into_inner().next().unwrap()))
-                .collect();
-            Ok(Expression::Call { task, args: args? })
-        }
-        Some(tag) => Err(miette!("tag `{tag}` is unknown")),
-        None => match tokens.as_rule() {
+        Some("test") | None => match tokens.as_rule() {
             Rule::equality | Rule::comparison | Rule::term | Rule::factor => parse_binop(tokens),
             Rule::unary => {
                 let mut pairs = tokens.into_inner();
@@ -296,6 +324,9 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
                             Ok(Expression::Literal(Literal::String(
                                 val.trim_matches('"').to_string(),
                             )))
+                        } else if val.starts_with('\'') && val.ends_with('\'') {
+                            let c = val.trim_matches('\'').chars().next().unwrap();
+                            Ok(Expression::Literal(Literal::Int(c as i64)))
                         } else if val.chars().all(|c| c.is_ascii_digit()) {
                             Ok(Expression::Literal(Literal::Int(
                                 val.parse().into_diagnostic()?,
@@ -309,6 +340,7 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
                         }
                     }
                     Rule::expression => parse_expr(inner),
+                    Rule::call => parse_expr(inner),
                     _ => unreachable!(),
                 }
             }
@@ -316,8 +348,23 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
                 let inner = tokens.into_inner().next().unwrap();
                 parse_expr(inner)
             }
+            Rule::call => {
+                let pairs = tokens.into_inner();
+                let task = pairs
+                    .find_first_tagged("task")
+                    .ok_or(miette!("Task has no name"))?
+                    .as_str()
+                    .to_string();
+                let args: miette::Result<Vec<Expression>> = pairs
+                    .clone()
+                    .find_tagged("arg")
+                    .map(|p| parse_expr(p.into_inner().next().unwrap()))
+                    .collect();
+                Ok(Expression::Call { task, args: args? })
+            }
             r => unimplemented!("{r:?}"),
         },
+        Some(tag) => Err(miette!("tag `{tag}` is unknown for expression")),
     }
 }
 
