@@ -2,14 +2,14 @@ use std::{collections::HashMap, fs::File, sync::Arc};
 
 use cranelift::{
     codegen::{
-        ir::{Function, UserFuncName},
+        ir::{immediates::Offset32, Function, StackSlot, UserFuncName},
         isa::TargetIsa,
         Context,
     },
     prelude::*,
 };
-use cranelift_module::{DataDescription, FuncId, Linkage, Module};
-use cranelift_object::{ObjectBuilder, ObjectModule};
+use cranelift_module::{DataDescription, FuncId, Module};
+use cranelift_object::{object::read::macho::FatArch, ObjectBuilder, ObjectModule};
 use miette::{miette, IntoDiagnostic};
 use tracing::info;
 
@@ -26,7 +26,6 @@ struct FunctionContext {
     name: String,
     param_types: Vec<String>,
     returns: Option<String>,
-    var_idx: usize,
     vars: HashMap<String, VarInfo>,
     func_id: FuncId,
 }
@@ -37,28 +36,20 @@ impl FunctionContext {
             name,
             param_types,
             returns,
-            var_idx: 0,
             vars: HashMap::new(),
             func_id: id,
         }
     }
 
-    fn declare_var(&mut self, name: &str, type_: String) -> VarInfo {
-        self.vars.insert(
-            name.to_string(),
-            VarInfo {
-                var: Variable::new(self.var_idx),
-                type_,
-            },
-        );
-        self.var_idx += 1;
+    fn declare_var(&mut self, name: &str, type_: String, slot: StackSlot) -> VarInfo {
+        self.vars.insert(name.to_string(), VarInfo { slot, type_ });
         self.vars[name].clone()
     }
 }
 
 #[derive(Debug, Clone)]
 struct VarInfo {
-    var: Variable,
+    slot: StackSlot,
     type_: String,
 }
 
@@ -66,7 +57,7 @@ impl CodeGen {
     pub fn new(mod_name: String, target: Arc<dyn TargetIsa>) -> miette::Result<Self> {
         let obj_builder = ObjectBuilder::new(
             target,
-            mod_name.clone().bytes().collect::<Vec<_>>(),
+            mod_name.bytes().collect::<Vec<_>>(),
             cranelift_module::default_libcall_names(),
         )
         .into_diagnostic()?;
@@ -98,7 +89,7 @@ impl CodeGen {
             match decl {
                 Declaration::ExternTask {
                     name,
-                    args,
+                    params: args,
                     returns,
                 } => {
                     let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
@@ -125,12 +116,12 @@ impl CodeGen {
                 }
                 Declaration::Task {
                     name,
-                    args,
+                    params,
                     returns,
                     body,
                 } => {
                     let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
-                    for (_, ty) in args {
+                    for (_, ty) in params {
                         sig.params
                             .push(AbiParam::new(self.to_cranelift_type(ty).unwrap()))
                     }
@@ -138,6 +129,8 @@ impl CodeGen {
                         sig.returns
                             .push(AbiParam::new(self.to_cranelift_type(ret).unwrap()));
                     }
+
+                    info!("{name} {:?}", params);
 
                     let func_id = self
                         .obj_module
@@ -147,7 +140,7 @@ impl CodeGen {
                     let fn_idx = self.insert_func(
                         name,
                         func_id,
-                        args.iter().map(|(_, ty)| ty.clone()).collect(),
+                        params.iter().map(|(_, ty)| ty.clone()).collect(),
                         returns.clone(),
                     );
                     let fn_name = UserFuncName::user(0, fn_idx as u32);
@@ -161,12 +154,17 @@ impl CodeGen {
                     func_builder.switch_to_block(fn_entry);
                     func_builder.seal_block(fn_entry);
 
-                    for (idx, (arg, ty)) in args.iter().enumerate() {
+                    for (idx, (arg, type_)) in params.iter().enumerate() {
+                        let ty = self.to_cranelift_type(type_).unwrap();
                         let fn_ctx = &mut self.functions[fn_idx];
-                        let var = fn_ctx.declare_var(arg, ty.clone());
-                        func_builder.declare_var(var.var, self.to_cranelift_type(ty).unwrap());
+                        let data = StackSlotData::new(StackSlotKind::ExplicitSlot, ty.bytes());
+                        let slot = func_builder.create_sized_stack_slot(data);
                         let params = func_builder.block_params(fn_entry);
-                        func_builder.def_var(var.var, params[idx]);
+                        let param = params[idx];
+                        func_builder
+                            .ins()
+                            .stack_store(param, slot, Offset32::new(0));
+                        fn_ctx.declare_var(arg, type_.clone(), slot);
                     }
 
                     for stmt in body {
@@ -186,27 +184,8 @@ impl CodeGen {
 
         let res = self.obj_module.finish();
         let obj_name = format!("{}.o", self.mod_name.trim_end_matches(".tbl"));
-        let mut file = File::create(&obj_name).into_diagnostic()?;
+        let mut file = File::create(obj_name).into_diagnostic()?;
         res.object.write_stream(&mut file).unwrap();
-
-        let elf_name = self.mod_name.trim_end_matches(".tbl");
-        std::process::Command::new("ld.lld")
-            .args([
-                "-o",
-                elf_name,
-                "-dynamic-linker",
-                "/lib/ld-linux-x86-64.so.2",
-                "/usr/lib/crt1.o",
-                "/usr/lib/crti.o",
-                "-L/usr/lib",
-                "-lc",
-                &obj_name,
-                "/usr/lib/crtn.o",
-            ])
-            .spawn()
-            .into_diagnostic()?
-            .wait()
-            .into_diagnostic()?;
 
         Ok(())
     }
@@ -259,6 +238,29 @@ impl CodeGen {
             crate::ast::Statement::Expression(expr) => {
                 self.compile_expr(func_builder, None, expr)?;
             }
+            crate::ast::Statement::PointerAssign { ptr, value } => {
+                let var = {
+                    let fn_ctx = &self.functions[fn_idx as usize];
+                    fn_ctx.vars[ptr].clone()
+                };
+                //let var_addr = func_builder.ins().stack_addr(
+                //    self.obj_module.target_config().pointer_type(),
+                //    var.slot,
+                //    Offset32::new(0),
+                //);
+                let var_addr = func_builder.ins().stack_load(
+                    self.obj_module.target_config().pointer_type(),
+                    var.slot,
+                    Offset32::new(0),
+                );
+                let val = self.compile_expr(func_builder, Some(var.type_), value)?;
+                func_builder
+                    .ins()
+                    .store(MemFlags::new(), val, var_addr, Offset32::new(0));
+                //func_builder
+                //    .ins()
+                //    .stack_store(val, var.slot, Offset32::new(0));
+            }
             crate::ast::Statement::Return(v) => {
                 let mut return_values = vec![];
                 if let Some(expr) = v {
@@ -274,13 +276,15 @@ impl CodeGen {
                 func_builder.ins().return_(&[]);
             }
             crate::ast::Statement::VarDecl { name, type_, value } => {
-                let var = {
-                    let fn_ctx = &mut self.functions[fn_idx as usize];
-                    fn_ctx.declare_var(name, type_.clone())
-                };
-                func_builder.declare_var(var.var, self.to_cranelift_type(type_).unwrap());
+                let ty = self.to_cranelift_type(type_).unwrap();
+                let data = StackSlotData::new(StackSlotKind::ExplicitSlot, ty.bytes());
+                let slot = func_builder.create_sized_stack_slot(data);
+                let fn_ctx = &mut self.functions[fn_idx as usize];
+                fn_ctx.declare_var(name, type_.clone(), slot);
                 let value = self.compile_expr(func_builder, Some(type_.clone()), value)?;
-                func_builder.def_var(var.var, value);
+                func_builder
+                    .ins()
+                    .stack_store(value, slot, Offset32::new(0));
             }
             crate::ast::Statement::VarAssign { name, value } => {
                 let var = {
@@ -288,7 +292,9 @@ impl CodeGen {
                     fn_ctx.vars[name].clone()
                 };
                 let val = self.compile_expr(func_builder, Some(var.type_), value)?;
-                func_builder.def_var(var.var, val)
+                func_builder
+                    .ins()
+                    .stack_store(val, var.slot, Offset32::new(0));
             }
         }
         Ok(())
@@ -318,7 +324,13 @@ impl CodeGen {
                         .declare_anonymous_data(true, false)
                         .into_diagnostic()?;
                     let mut description = DataDescription::new();
-                    description.define(s.clone().into_bytes().into_iter().collect::<Box<[u8]>>());
+                    description.define(
+                        s.clone()
+                            .into_bytes()
+                            .into_iter()
+                            .chain(std::iter::once(0))
+                            .collect::<Box<[u8]>>(),
+                    );
                     self.obj_module
                         .define_data(data_id, &description)
                         .into_diagnostic()?;
@@ -326,6 +338,20 @@ impl CodeGen {
                     Ok(builder
                         .ins()
                         .global_value(self.obj_module.target_config().pointer_type(), data))
+
+                    //let data = StackSlotData::new(StackSlotKind::ExplicitSlot, s.len() as u32);
+                    //let slot = builder.create_sized_stack_slot(data);
+                    //for (offset, b) in s.as_bytes().iter().enumerate() {
+                    //    let v = builder.ins().iconst(types::I8, *b as i64);
+                    //    builder
+                    //        .ins()
+                    //        .stack_store(v, slot, Offset32::new(offset as i32));
+                    //}
+                    //Ok(builder.ins().stack_addr(
+                    //    self.obj_module.target_config().pointer_type(),
+                    //    slot,
+                    //    Offset32::new(0),
+                    //))
                 }
                 crate::ast::Literal::Bool(v) => match v {
                     true => Ok(builder.ins().iconst(types::I8, 1)),
@@ -334,7 +360,11 @@ impl CodeGen {
             },
             Expression::Var(v) => {
                 let var = &ctx.vars[v];
-                Ok(builder.use_var(var.var))
+                Ok(builder.ins().stack_load(
+                    self.to_cranelift_type(&var.type_).unwrap(),
+                    var.slot,
+                    Offset32::new(0),
+                ))
             }
             Expression::Call { task, args } => {
                 let func_ctx = self.functions.iter().find(|f| &f.name == task).unwrap();
@@ -407,7 +437,29 @@ impl CodeGen {
                     crate::ast::BinaryOperator::Divide => Ok(builder.ins().sdiv(left, right)),
                 }
             }
-            Expression::UnaryOperation { value, operator } => todo!(),
+            Expression::UnaryOperation { value, operator } => {
+                let val = self.compile_expr(builder, type_hint.clone(), value)?;
+                match operator {
+                    crate::ast::UnaryOperator::Dereference => Ok(builder.ins().load(
+                        self.to_cranelift_type(&type_hint.unwrap()).unwrap(),
+                        MemFlags::new(),
+                        val,
+                        Offset32::new(0),
+                    )),
+                    crate::ast::UnaryOperator::Not => Ok(builder.ins().bnot(val)),
+                    crate::ast::UnaryOperator::Minus => Ok(builder.ins().ineg(val)),
+                    crate::ast::UnaryOperator::Reference => {
+                        let Expression::Var(v) = *value.clone() else {panic!()};
+                        let ctx = &self.functions[fn_idx as usize];
+                        let var = &ctx.vars[&v];
+                        Ok(builder.ins().stack_addr(
+                            self.obj_module.target_config().pointer_type(),
+                            var.slot,
+                            Offset32::new(0),
+                        ))
+                    }
+                }
+            }
         }
     }
 

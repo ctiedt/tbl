@@ -1,0 +1,11 @@
+extern task printf(template: &u8, n: &u32);
+
+task main() -> u32 {
+    var x: u64 = 42;
+    var y: &u64 = &x;
+    printf("%p, ", y);
+    *y = 1337;
+    printf("%d, ", x);
+    printf("%d, ", *y);
+    return 0;
+}

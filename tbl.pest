@@ -2,21 +2,22 @@ program = { SOI ~ decl* ~ EOI }
 
 decl = { task | extern_task }
 
-extern_task = { "extern" ~ "task" ~ (#name = ident) ~ "(" ~ arg_list? ~ ")" ~ ("->" ~ #returns = ident)? ~ ";" }
+extern_task = { "extern" ~ "task" ~ (#name = ident) ~ "(" ~ param_list? ~ ")" ~ ("->" ~ #returns = type)? ~ ";" }
 
-task = { "task" ~ (#name = ident) ~ "(" ~ arg_list? ~ ")" ~ ("->" ~ #returns = ident)? ~ "{" ~ (#body = statement)* ~ "}" }
+task = { "task" ~ (#name = ident) ~ "(" ~ param_list? ~ ")" ~ ("->" ~ #returns = type)? ~ "{" ~ (#body = statement)* ~ "}" }
 
-arg_list = _{ (#arg = ident ~ ":" ~ #type = type ~ ",")* ~ (#arg = ident ~ ":" ~ #type = type) }
+param_list = _{ (#param = ident ~ ":" ~ #type = type ~ ",")* ~ (#param = ident ~ ":" ~ #type = type) }
 
 ident = @{ (ASCII_ALPHA | "_")+ ~ (ASCII_ALPHANUMERIC | "_")* }
 
 type = @{ "&"* ~ ident }
 
-statement = { #cond = conditional | (#var_decl = var_decl | #var_assign = var_assign | (#return = return) | #sched = ("schedule" ~ call) | #exit = exit | (#expr = expression)) ~ ";" }
+statement = { #cond = conditional | (#var_decl = var_decl | #var_assign = var_assign | #ptr_assign = ptr_assign | (#return = return) | #sched = ("schedule" ~ call) | #exit = exit | (#expr = expression)) ~ ";" }
 exit = { "exit" }
 return = { "return" ~ expression? }
 var_decl = { "var " ~ #name = ident ~ ":" ~ #type = type ~ "=" ~ #value = expression }
 var_assign = { #name = ident ~ "=" ~ #value = expression }
+ptr_assign = { "*" ~ #ptr = ident ~ "=" ~ #value = expression }
 
 conditional = { "if" ~ (#test = expression) ~ "{" ~ #then = statement* ~ "}" ~ ("else" ~ (("{" ~ #else = statement* ~ "}") | conditional))? }
 
@@ -39,9 +40,9 @@ un_op = { "!" | "-" | "*" | "&" }
 
 primary = { call | value | ident | "(" ~ expression ~ ")" }
 
-call = { #task = ident ~ "(" ~ param_list? ~ ")" }
+call = { #task = ident ~ "(" ~ arg_list? ~ ")" }
 
-param_list = _{ (#arg = expression ~ ",")* ~ #arg = expression }
+arg_list = _{ (#arg = expression ~ ",")* ~ #arg = expression }
 
 value = { string | #int = ASCII_DIGIT+ | #bool = ("true" | "false") | "'" ~ #char = (ASCII) ~ "'" }
 

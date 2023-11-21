@@ -21,12 +21,12 @@ pub struct Program {
 pub enum Declaration {
     ExternTask {
         name: String,
-        args: Vec<(String, String)>,
+        params: Vec<(String, String)>,
         returns: Option<String>,
     },
     Task {
         name: String,
-        args: Vec<(String, String)>,
+        params: Vec<(String, String)>,
         returns: Option<String>,
         body: Vec<Statement>,
     },
@@ -41,6 +41,10 @@ pub enum Statement {
     },
     Exit,
     Expression(Expression),
+    PointerAssign {
+        ptr: String,
+        value: Expression,
+    },
     Return(Option<Expression>),
     Schedule {
         task: String,
@@ -116,8 +120,10 @@ impl FromStr for BinaryOperator {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum UnaryOperator {
+    Dereference,
     Not,
     Minus,
+    Reference,
 }
 
 impl FromStr for UnaryOperator {
@@ -125,8 +131,10 @@ impl FromStr for UnaryOperator {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "*" => Ok(UnaryOperator::Dereference),
             "!" => Ok(UnaryOperator::Not),
             "-" => Ok(UnaryOperator::Minus),
+            "&" => Ok(UnaryOperator::Reference),
             other => Err(ParseError::UnknownOperator(other.into())),
         }
     }
@@ -155,22 +163,22 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
             let returns = pairs
                 .find_first_tagged("returns")
                 .map(|p| p.as_str().to_string());
-            let arg_names = pairs
+            let param_names = pairs
                 .clone()
-                .find_tagged("arg")
+                .find_tagged("param")
                 .map(|p| p.as_str().to_string());
-            let arg_types = pairs
+            let param_types = pairs
                 .clone()
                 .find_tagged("type")
                 .map(|p| p.as_str().to_string());
-            let args = arg_names.zip(arg_types).collect();
+            let params = param_names.zip(param_types).collect();
             let body: miette::Result<Vec<Statement>> =
                 pairs.find_tagged("body").map(parse_stmt).collect();
             let body = body?;
 
             Ok(Declaration::Task {
                 name,
-                args,
+                params,
                 returns,
                 body,
             })
@@ -185,19 +193,19 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
             let returns = pairs
                 .find_first_tagged("returns")
                 .map(|p| p.as_str().to_string());
-            let arg_names = pairs
+            let param_names = pairs
                 .clone()
-                .find_tagged("arg")
+                .find_tagged("param")
                 .map(|p| p.as_str().to_string());
-            let arg_types = pairs
+            let param_types = pairs
                 .clone()
                 .find_tagged("type")
                 .map(|p| p.as_str().to_string());
-            let args = arg_names.zip(arg_types).collect();
+            let params = param_names.zip(param_types).collect();
 
             Ok(Declaration::ExternTask {
                 name,
-                args,
+                params,
                 returns,
             })
         }
@@ -292,6 +300,23 @@ pub fn parse_stmt(tokens: Pair<'_, Rule>) -> miette::Result<Statement> {
                     .ok_or(miette!("Variable value should contain a pair"))?,
             )?;
             Ok(Statement::VarAssign { name, value })
+        }
+        Some("ptr_assign") => {
+            let inner = pair.into_inner();
+            let ptr = inner
+                .find_first_tagged("ptr")
+                .ok_or(miette!("Variable has no name"))?
+                .as_str()
+                .to_string();
+            let value = parse_expr(
+                inner
+                    .find_first_tagged("value")
+                    .ok_or(miette!("Variable has no value"))?
+                    .into_inner()
+                    .next()
+                    .ok_or(miette!("Variable value should contain a pair"))?,
+            )?;
+            Ok(Statement::PointerAssign { ptr, value })
         }
         Some(t) => Err(miette!("Unknown tag for statement `{t}`")),
         None => Err(miette!("Statement `{}` is untagged", pair.as_str())),
