@@ -1,4 +1,4 @@
-extern task putchar(n: u32);
+extern task printf(template: &u8, n: u32);
 
 task fac(n: u32) -> u32 {
     if (n == 0) {
@@ -11,5 +11,6 @@ task fac(n: u32) -> u32 {
 task main() -> u32 {
     var n: u32 = 5;
     var m: u32 = fac(n);
-    return m;
+    printf("%d\n", m);
+    return 0;
 }

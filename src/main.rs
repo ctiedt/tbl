@@ -48,6 +48,44 @@ fn parse_program(tokens: Pair<'_, Rule>) -> miette::Result<Program> {
     Ok(Program { declarations })
 }
 
+fn link(file: &str) -> miette::Result<()> {
+    let elf_name = file.trim_end_matches(".tbl");
+    let obj_name = format!("{elf_name}.o");
+    if cfg!(unix) {
+        std::process::Command::new("ld.lld")
+            .args([
+                "-o",
+                elf_name,
+                "-dynamic-linker",
+                "/lib/ld-linux-x86-64.so.2",
+                "/usr/lib/crt1.o",
+                "/usr/lib/crti.o",
+                "-L/usr/lib",
+                "-lc",
+                &obj_name,
+                "/usr/lib/crtn.o",
+            ])
+            .spawn()
+            .into_diagnostic()?
+            .wait()
+            .into_diagnostic()?;
+    } else if cfg!(windows) {
+        std::process::Command::new("link.exe")
+            .args([
+                &format!("-out:{elf_name}.exe"),
+                "-entry:main",
+                &obj_name,
+                "ucrt.lib",
+                "legacy_stdio_definitions.lib",
+            ])
+            .spawn()
+            .into_diagnostic()?
+            .wait()
+            .into_diagnostic()?;
+    }
+    Ok(())
+}
+
 fn main() -> miette::Result<()> {
     let args = Args::parse();
 
@@ -69,14 +107,14 @@ fn main() -> miette::Result<()> {
         .finish(shared_flags)
         .into_diagnostic()?;
 
-    let codegen = CodeGen::new(
-        args.file
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned(),
-        target,
-    )?;
+    let mod_name = args
+        .file
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let codegen = CodeGen::new(mod_name.clone(), target)?;
     codegen.compile(program)?;
+    link(&mod_name)?;
     Ok(())
 }
