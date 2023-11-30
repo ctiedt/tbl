@@ -1,16 +1,23 @@
 program = { SOI ~ decl* ~ EOI }
 
-decl = { task | extern_task }
+decl = { task | extern_task | struct }
 
 extern_task = { "extern" ~ "task" ~ (#name = ident) ~ "(" ~ param_list? ~ ")" ~ ("->" ~ #returns = type)? ~ ";" }
 
 task = { "task" ~ (#name = ident) ~ "(" ~ param_list? ~ ")" ~ ("->" ~ #returns = type)? ~ "{" ~ (#body = statement)* ~ "}" }
 
+struct = { "struct" ~ (#name = ident) ~ "{" ~ param_list ~ "}" }
+
 param_list = _{ (#param = ident ~ ":" ~ #type = type ~ ",")* ~ (#param = ident ~ ":" ~ #type = type) }
 
 ident = @{ (ASCII_ALPHA | "_")+ ~ (ASCII_ALPHANUMERIC | "_")* }
 
-type = @{ "&"* ~ ident }
+type = { #bool = bool | #int = integer | #array = array | #ptr = pointer_to | #named = ident }
+bool = { "bool" }
+pointer_to = { "&" ~ type }
+array = { "[" ~ #item = type ~ ";" ~ (#len = int_literal) ~ "]" }
+int_literal = { ASCII_DIGIT+ }
+integer = @{ ("u" | "i") ~ ("8" | "16" | "32" | "64") }
 
 statement = { #cond = conditional | (#var_decl = var_decl | #var_assign = var_assign | #ptr_assign = ptr_assign | (#return = return) | #sched = ("schedule" ~ call) | #exit = exit | (#expr = expression)) ~ ";" }
 exit = { "exit" }
