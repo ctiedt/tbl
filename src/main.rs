@@ -18,6 +18,7 @@ use crate::ast::parse_decl;
 
 mod ast;
 mod codegen;
+mod runtime;
 
 #[derive(Parser)]
 #[grammar = "tbl.pest"]

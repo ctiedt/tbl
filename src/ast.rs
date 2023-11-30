@@ -18,16 +18,25 @@ pub struct Program {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Type {
+    Bool,
+    Integer { signed: bool, width: u8 },
+    Array { item: Box<Type>, length: u64 },
+    Pointer(Box<Type>),
+    Named(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Declaration {
     ExternTask {
         name: String,
-        params: Vec<(String, String)>,
-        returns: Option<String>,
+        params: Vec<(String, Type)>,
+        returns: Option<Type>,
     },
     Task {
         name: String,
-        params: Vec<(String, String)>,
-        returns: Option<String>,
+        params: Vec<(String, Type)>,
+        returns: Option<Type>,
         body: Vec<Statement>,
     },
 }
@@ -52,7 +61,7 @@ pub enum Statement {
     },
     VarDecl {
         name: String,
-        type_: String,
+        type_: Type,
         value: Expression,
     },
     VarAssign {
@@ -147,6 +156,58 @@ pub enum Literal {
     Bool(bool),
 }
 
+pub fn parse_type(tokens: Pair<'_, Rule>) -> miette::Result<Type> {
+    let pair = tokens
+        .into_inner()
+        .next()
+        .ok_or(miette!("Declaration should contain one inner pair"))?;
+    match pair.as_rule() {
+        Rule::bool => Ok(Type::Bool),
+        Rule::integer => {
+            let (signed, width) = pair.as_str().split_at(1);
+            let signed = match signed {
+                "u" => false,
+                "i" => true,
+                _ => unreachable!(),
+            };
+            Ok(Type::Integer {
+                signed,
+                width: width.parse().into_diagnostic()?,
+            })
+        }
+        Rule::array => {
+            let inner = pair.into_inner();
+            let item = parse_type(
+                inner
+                    .find_first_tagged("item")
+                    .ok_or(miette!("Array must have a type"))?,
+            )?;
+            let length = inner
+                .find_first_tagged("len")
+                .ok_or(miette!("Array must have a length"))?
+                .as_str()
+                .parse()
+                .into_diagnostic()?;
+
+            Ok(Type::Array {
+                item: Box::new(item),
+                length,
+            })
+        }
+        Rule::pointer_to => {
+            let inner = parse_type(
+                pair.into_inner()
+                    .next()
+                    .ok_or(miette!("Pointer must reference a type"))?,
+            )?;
+
+            Ok(Type::Pointer(Box::new(inner)))
+        }
+        Rule::ident => Ok(Type::Named(pair.as_str().to_owned())),
+        _ => unreachable!(),
+    }
+}
+
 pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
     let pair = tokens
         .into_inner()
@@ -162,16 +223,18 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
                 .to_string();
             let returns = pairs
                 .find_first_tagged("returns")
-                .map(|p| p.as_str().to_string());
+                .map(|p| parse_type(p))
+                .transpose()?;
             let param_names = pairs
                 .clone()
                 .find_tagged("param")
                 .map(|p| p.as_str().to_string());
-            let param_types = pairs
+            let param_types: miette::Result<Vec<Type>> = pairs
                 .clone()
                 .find_tagged("type")
-                .map(|p| p.as_str().to_string());
-            let params = param_names.zip(param_types).collect();
+                .map(|p| parse_type(p))
+                .collect();
+            let params = param_names.zip(param_types?).collect();
             let body: miette::Result<Vec<Statement>> =
                 pairs.find_tagged("body").map(parse_stmt).collect();
             let body = body?;
@@ -192,16 +255,18 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
                 .to_string();
             let returns = pairs
                 .find_first_tagged("returns")
-                .map(|p| p.as_str().to_string());
+                .map(|p| parse_type(p))
+                .transpose()?;
             let param_names = pairs
                 .clone()
                 .find_tagged("param")
                 .map(|p| p.as_str().to_string());
-            let param_types = pairs
+            let param_types: miette::Result<Vec<Type>> = pairs
                 .clone()
                 .find_tagged("type")
-                .map(|p| p.as_str().to_string());
-            let params = param_names.zip(param_types).collect();
+                .map(|p| parse_type(p))
+                .collect();
+            let params = param_names.zip(param_types?).collect();
 
             Ok(Declaration::ExternTask {
                 name,
@@ -268,11 +333,11 @@ pub fn parse_stmt(tokens: Pair<'_, Rule>) -> miette::Result<Statement> {
                 .ok_or(miette!("Variable has no name"))?
                 .as_str()
                 .to_string();
-            let type_ = inner
-                .find_first_tagged("type")
-                .ok_or(miette!("Variable has no type"))?
-                .as_str()
-                .to_string();
+            let type_ = parse_type(
+                inner
+                    .find_first_tagged("type")
+                    .ok_or(miette!("Variable has no type"))?,
+            )?;
             let value = parse_expr(
                 inner
                     .find_first_tagged("value")
@@ -346,9 +411,8 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
                     Rule::value => {
                         let val = inner.as_str();
                         if val.starts_with('"') && val.ends_with('"') {
-                            Ok(Expression::Literal(Literal::String(
-                                val.trim_matches('"').to_string(),
-                            )))
+                            let unescaped = snailquote::unescape(val).into_diagnostic()?;
+                            Ok(Expression::Literal(Literal::String(unescaped)))
                         } else if val.starts_with('\'') && val.ends_with('\'') {
                             let c = val.trim_matches('\'').chars().next().unwrap();
                             Ok(Expression::Literal(Literal::Int(c as i64)))
