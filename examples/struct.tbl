@@ -1,0 +1,14 @@
+extern task printf(...);
+
+struct Point {
+    x: u32,
+    y: u32
+}
+
+task main() -> u32 {
+    var p: Point = {x: 0, y: 32};
+    printf("(%d)\n", p.x);
+    p.x = 42;
+    printf("(%d, %d)\n", p.x, p.y);
+    return 0;
+}

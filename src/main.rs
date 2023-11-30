@@ -98,6 +98,7 @@ fn main() -> miette::Result<()> {
         .into_diagnostic()?
         .next()
         .unwrap();
+
     let program = parse_program(parsed)?;
 
     let mut shared_builder = settings::builder();

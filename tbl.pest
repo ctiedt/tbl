@@ -21,12 +21,13 @@ array = { "[" ~ #item = type ~ ";" ~ (#len = int_literal) ~ "]" }
 int_literal = { ASCII_DIGIT+ }
 integer = @{ ("u" | "i") ~ ("8" | "16" | "32" | "64") }
 
-statement = { #cond = conditional | (#var_decl = var_decl | #var_assign = var_assign | #ptr_assign = ptr_assign | (#return = return) | #sched = ("schedule" ~ call) | #exit = exit | (#expr = expression)) ~ ";" }
+statement = { #cond = conditional | (#var_decl = var_decl | #var_assign = var_assign | #ptr_assign = ptr_assign | #struct_assign = struct_assign | (#return = return) | #sched = ("schedule" ~ call) | #exit = exit | (#expr = expression)) ~ ";" }
 exit = { "exit" }
 return = { "return" ~ expression? }
 var_decl = { "var " ~ #name = ident ~ ":" ~ #type = type ~ "=" ~ #value = expression }
 var_assign = { #name = ident ~ "=" ~ #value = expression }
 ptr_assign = { "*" ~ #ptr = ident ~ "=" ~ #value = expression }
+struct_assign = { #struct = ident ~ "." ~ #member = ident ~ "=" ~ #value = expression }
 
 conditional = { "if" ~ (#test = expression) ~ "{" ~ #then = statement* ~ "}" ~ ("else" ~ (("{" ~ #else = statement* ~ "}") | conditional))? }
 
@@ -47,13 +48,15 @@ mul_op = { "/" | "*" }
 unary = { un_op ~ unary | primary }
 un_op = { "!" | "-" | "*" | "&" }
 
-primary = { call | value | ident | "(" ~ expression ~ ")" }
+primary = { call | struct_access | value | ident | "(" ~ expression ~ ")" }
 
 call = { #task = ident ~ "(" ~ arg_list? ~ ")" }
 
 arg_list = _{ (#arg = expression ~ ",")* ~ #arg = expression }
 
-value = { string | #int = ASCII_DIGIT+ | #bool = ("true" | "false") | "'" ~ #char = (ASCII) ~ "'" }
+value = { #struct = struct_literal | string | #int = ASCII_DIGIT+ | #bool = ("true" | "false") | "'" ~ #char = (ASCII) ~ "'" }
+struct_access = { #var = ident ~ "." ~ #member = ident }
+struct_literal = { "{" ~ (#member = ident ~ ":" ~ #value = expression ~ ",")* ~ (#member = ident ~ ":" ~ #value = expression) ~ "}" }
 
 string = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
 

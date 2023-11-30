@@ -19,6 +19,19 @@ pub struct CodeGen {
     mod_name: String,
     obj_module: ObjectModule,
     functions: Vec<FunctionContext>,
+    types: Vec<StructContext>,
+}
+
+#[derive(Clone, Debug)]
+struct StructContext {
+    name: String,
+    members: Vec<(String, TblType)>,
+}
+
+impl StructContext {
+    fn member_ty(&self, idx: usize) -> &TblType {
+        &self.members[idx].1
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +86,7 @@ impl CodeGen {
             mod_name,
             obj_module: ObjectModule::new(obj_builder),
             functions: Vec::new(),
+            types: Vec::new(),
         })
     }
 
@@ -208,6 +222,10 @@ impl CodeGen {
                         .define_function(func_id, &mut ctx)
                         .into_diagnostic()?;
                 }
+                Declaration::Struct { name, members } => self.types.push(StructContext {
+                    name: name.clone(),
+                    members: members.clone(),
+                }),
             }
         }
 
@@ -335,16 +353,69 @@ impl CodeGen {
             crate::ast::Statement::Schedule { task, args } => {
                 func_builder.ins().return_(&[]);
             }
+            crate::ast::Statement::StructAssign { var, member, value } => {
+                let Expression::Var(name) = var else {
+                    unreachable!()
+                };
+                let var = {
+                    let fn_ctx = &self.functions[fn_idx as usize];
+                    fn_ctx.vars[name].clone()
+                };
+
+                let ty_name = var.type_.name();
+                let ty = &self
+                    .types
+                    .iter()
+                    .find(|t| t.name == ty_name)
+                    .ok_or(miette!("Unknown struct type `{ty_name}`"))?
+                    .members;
+
+                let mut offset = 0;
+                let mut idx = 0;
+                while &ty[idx].0 != member {
+                    offset += self.type_size(&ty[idx].1);
+                    idx += 1;
+                }
+
+                let value = self.compile_expr(func_builder, Some(ty[idx].1.clone()), value)?;
+
+                func_builder
+                    .ins()
+                    .stack_store(value, var.slot, Offset32::new(offset as i32));
+            }
             crate::ast::Statement::VarDecl { name, type_, value } => {
-                let ty = self.to_cranelift_type(type_).unwrap();
-                let data = StackSlotData::new(StackSlotKind::ExplicitSlot, ty.bytes());
+                let data = StackSlotData::new(StackSlotKind::ExplicitSlot, self.type_size(type_));
                 let slot = func_builder.create_sized_stack_slot(data);
                 let fn_ctx = &mut self.functions[fn_idx as usize];
                 fn_ctx.declare_var(name, type_.clone(), slot);
-                let value = self.compile_expr(func_builder, Some(type_.clone()), value)?;
-                func_builder
-                    .ins()
-                    .stack_store(value, slot, Offset32::new(0));
+                match type_ {
+                    TblType::Named(name) => {
+                        let Expression::Literal(crate::ast::Literal::Struct(members)) = value
+                        else {
+                            unreachable!()
+                        };
+                        let struct_ty =
+                            self.types.iter().find(|t| &t.name == name).unwrap().clone();
+                        let mut current_offset = 0;
+                        for (idx, (_, value)) in members.iter().enumerate() {
+                            let member_ty = struct_ty.member_ty(idx).clone();
+                            let val =
+                                self.compile_expr(func_builder, Some(member_ty.clone()), value)?;
+                            func_builder.ins().stack_store(
+                                val,
+                                slot,
+                                Offset32::new(current_offset),
+                            );
+                            current_offset += self.type_size(&member_ty) as i32;
+                        }
+                    }
+                    _ => {
+                        let value = self.compile_expr(func_builder, Some(type_.clone()), value)?;
+                        func_builder
+                            .ins()
+                            .stack_store(value, slot, Offset32::new(0));
+                    }
+                }
             }
             crate::ast::Statement::VarAssign { name, value } => {
                 let var = {
@@ -403,9 +474,16 @@ impl CodeGen {
                     true => Ok(builder.ins().iconst(types::I8, 1)),
                     false => Ok(builder.ins().iconst(types::I8, 0)),
                 },
+                crate::ast::Literal::Struct(_members) => {
+                    // Struct literals are weird. They are handled in the assignment of struct variables.
+                    unimplemented!()
+                }
             },
             Expression::Var(v) => {
-                let var = &ctx.vars[v];
+                let var = ctx
+                    .vars
+                    .get(v)
+                    .ok_or(miette!("Variable `{v}` does not exist"))?;
                 Ok(builder.ins().stack_load(
                     self.to_cranelift_type(&var.type_).unwrap(),
                     var.slot,
@@ -538,6 +616,33 @@ impl CodeGen {
                     }
                 }
             }
+            Expression::StructAccess { value, member } => {
+                let Expression::Var(ref val) = **value else {
+                    unreachable!()
+                };
+                let var = &ctx.vars[val];
+                let ty_name = var.type_.name();
+                let ty = &self
+                    .types
+                    .iter()
+                    .find(|t| t.name == ty_name)
+                    .ok_or(miette!("Unknown struct type `{val}`"))?
+                    .members;
+
+                let mut offset = 0;
+                let mut idx = 0;
+                while &ty[idx].0 != member {
+                    offset += self.type_size(&ty[idx].1);
+                    idx += 1;
+                }
+
+                Ok(builder.ins().stack_load(
+                    self.to_cranelift_type(&ty[idx].1)
+                        .ok_or(miette!("Cannot convert TBL type to cranelift type"))?,
+                    var.slot,
+                    Offset32::new(offset as i32),
+                ))
+            }
         }
     }
 
@@ -552,6 +657,7 @@ impl CodeGen {
                     })))
                 }
                 crate::ast::Literal::Bool(_) => Some(TblType::Bool),
+                crate::ast::Literal::Struct(_) => None,
             },
             Expression::Var(v) => ctx.vars.get(v).map(|var| var.type_.clone()),
             Expression::Call { task, .. } => self
@@ -567,6 +673,10 @@ impl CodeGen {
                 }
             }
             Expression::UnaryOperation { value, .. } => self.type_of(ctx, value),
+            Expression::StructAccess { value, member } => {
+                // TODO: check member type
+                None
+            }
         }
     }
 
@@ -580,7 +690,20 @@ impl CodeGen {
             TblType::Integer { .. } => None,
             TblType::Array { .. } => Some(self.obj_module.target_config().pointer_type()),
             TblType::Pointer(_) => Some(self.obj_module.target_config().pointer_type()),
-            TblType::Named(_) => todo!(),
+            TblType::Named(_) => None,
+        }
+    }
+
+    fn type_size(&self, type_: &TblType) -> u32 {
+        match self.to_cranelift_type(type_) {
+            Some(t) => t.bytes(),
+            None => match type_ {
+                TblType::Named(name) => {
+                    let ty = self.types.iter().find(|t| &t.name == name).unwrap();
+                    ty.members.iter().map(|(_, t)| self.type_size(t)).sum()
+                }
+                _ => unreachable!(),
+            },
         }
     }
 }
