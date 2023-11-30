@@ -1,4 +1,4 @@
-extern task printf(template: &u8, n: &u32);
+extern task printf(...);
 
 task main() -> u32 {
     var x: u64 = 42;
@@ -6,6 +6,6 @@ task main() -> u32 {
     printf("%p, ", y);
     *y = 1337;
     printf("%d, ", x);
-    printf("%d, ", *y);
+    printf("%d\n", *y);
     return 0;
 }

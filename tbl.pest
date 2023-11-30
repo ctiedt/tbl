@@ -2,7 +2,9 @@ program = { SOI ~ decl* ~ EOI }
 
 decl = { task | extern_task | struct }
 
-extern_task = { "extern" ~ "task" ~ (#name = ident) ~ "(" ~ param_list? ~ ")" ~ ("->" ~ #returns = type)? ~ ";" }
+extern_task = { "extern" ~ "task" ~ (#name = ident) ~ "(" ~ (param_list | #variadic = variadic_params)? ~ ")" ~ ("->" ~ #returns = type)? ~ ";" }
+
+variadic_params = { "..." }
 
 task = { "task" ~ (#name = ident) ~ "(" ~ param_list? ~ ")" ~ ("->" ~ #returns = type)? ~ "{" ~ (#body = statement)* ~ "}" }
 

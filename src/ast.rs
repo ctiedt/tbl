@@ -27,10 +27,31 @@ pub enum Type {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExternTaskParams {
+    Variadic,
+    WellKnown(Vec<(String, Type)>),
+}
+
+impl ExternTaskParams {
+    pub fn is_variadic(&self) -> bool {
+        matches!(self, ExternTaskParams::Variadic)
+    }
+
+    pub fn types_only(&self) -> Vec<Type> {
+        match self {
+            ExternTaskParams::Variadic => vec![],
+            ExternTaskParams::WellKnown(params) => {
+                params.iter().map(|(_, ty)| ty.clone()).collect()
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Declaration {
     ExternTask {
         name: String,
-        params: Vec<(String, Type)>,
+        params: ExternTaskParams,
         returns: Option<Type>,
     },
     Task {
@@ -257,16 +278,21 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
                 .find_first_tagged("returns")
                 .map(|p| parse_type(p))
                 .transpose()?;
-            let param_names = pairs
-                .clone()
-                .find_tagged("param")
-                .map(|p| p.as_str().to_string());
-            let param_types: miette::Result<Vec<Type>> = pairs
-                .clone()
-                .find_tagged("type")
-                .map(|p| parse_type(p))
-                .collect();
-            let params = param_names.zip(param_types?).collect();
+            let params = if pairs.clone().find_first_tagged("variadic").is_some() {
+                ExternTaskParams::Variadic
+            } else {
+                let param_names = pairs
+                    .clone()
+                    .find_tagged("param")
+                    .map(|p| p.as_str().to_string());
+                let param_types: miette::Result<Vec<Type>> = pairs
+                    .clone()
+                    .find_tagged("type")
+                    .map(|p| parse_type(p))
+                    .collect();
+                let params = param_names.zip(param_types?).collect();
+                ExternTaskParams::WellKnown(params)
+            };
 
             Ok(Declaration::ExternTask {
                 name,

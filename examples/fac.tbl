@@ -1,4 +1,4 @@
-extern task printf(template: &u8, n: u32);
+extern task printf(...);
 
 task fac(n: u32) -> u32 {
     if (n == 0) {

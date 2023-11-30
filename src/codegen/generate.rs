@@ -13,7 +13,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use miette::{miette, IntoDiagnostic};
 use tracing::info;
 
-use crate::ast::{Declaration, Expression, Program, Statement, Type as TblType};
+use crate::ast::{Declaration, Expression, ExternTaskParams, Program, Statement, Type as TblType};
 
 pub struct CodeGen {
     mod_name: String,
@@ -28,16 +28,24 @@ struct FunctionContext {
     returns: Option<TblType>,
     vars: HashMap<String, VarInfo>,
     func_id: FuncId,
+    is_variadic: bool,
 }
 
 impl FunctionContext {
-    fn new(name: String, id: FuncId, param_types: Vec<TblType>, returns: Option<TblType>) -> Self {
+    fn new(
+        name: String,
+        id: FuncId,
+        param_types: Vec<TblType>,
+        returns: Option<TblType>,
+        is_variadic: bool,
+    ) -> Self {
         Self {
             name,
             param_types,
             returns,
             vars: HashMap::new(),
             func_id: id,
+            is_variadic,
         }
     }
 
@@ -74,12 +82,14 @@ impl CodeGen {
         id: FuncId,
         param_types: Vec<TblType>,
         returns: Option<TblType>,
+        is_variadic: bool,
     ) -> usize {
         self.functions.push(FunctionContext::new(
             name.to_string(),
             id,
             param_types,
             returns,
+            is_variadic,
         ));
         self.functions.len() - 1
     }
@@ -93,9 +103,11 @@ impl CodeGen {
                     returns,
                 } => {
                     let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
-                    for (_, ty) in args {
-                        sig.params
-                            .push(AbiParam::new(self.to_cranelift_type(ty).unwrap()))
+                    if let ExternTaskParams::WellKnown(args) = args {
+                        for (_, ty) in args {
+                            sig.params
+                                .push(AbiParam::new(self.to_cranelift_type(ty).unwrap()))
+                        }
                     }
                     if let Some(ret) = returns {
                         sig.returns
@@ -110,8 +122,9 @@ impl CodeGen {
                     let _fn_idx = self.insert_func(
                         name,
                         id,
-                        args.iter().map(|(_, ty)| ty.clone()).collect(),
+                        args.types_only(),
                         returns.clone(),
+                        args.is_variadic(),
                     );
                 }
                 Declaration::Task {
@@ -147,6 +160,7 @@ impl CodeGen {
                         func_id,
                         params.iter().map(|(_, ty)| ty.clone()).collect(),
                         returns.clone(),
+                        false,
                     );
                     let fn_name = UserFuncName::user(0, fn_idx as u32);
 
@@ -208,7 +222,7 @@ impl CodeGen {
     }
 
     fn build_start(&mut self) -> miette::Result<()> {
-        let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
+        let sig = Signature::new(self.obj_module.isa().default_call_conv());
         let func_id = self
             .obj_module
             .declare_function("main", cranelift_module::Linkage::Export, &sig)
@@ -384,20 +398,6 @@ impl CodeGen {
                     Ok(builder
                         .ins()
                         .global_value(self.obj_module.target_config().pointer_type(), data))
-
-                    //let data = StackSlotData::new(StackSlotKind::ExplicitSlot, s.len() as u32);
-                    //let slot = builder.create_sized_stack_slot(data);
-                    //for (offset, b) in s.as_bytes().iter().enumerate() {
-                    //    let v = builder.ins().iconst(types::I8, *b as i64);
-                    //    builder
-                    //        .ins()
-                    //        .stack_store(v, slot, Offset32::new(offset as i32));
-                    //}
-                    //Ok(builder.ins().stack_addr(
-                    //    self.obj_module.target_config().pointer_type(),
-                    //    slot,
-                    //    Offset32::new(0),
-                    //))
                 }
                 crate::ast::Literal::Bool(v) => match v {
                     true => Ok(builder.ins().iconst(types::I8, 1)),
@@ -417,18 +417,45 @@ impl CodeGen {
                 let func = self
                     .obj_module
                     .declare_func_in_func(func_ctx.func_id, builder.func);
-                let mut arg_vals = vec![];
-                let param_types = func_ctx.param_types.clone();
-                for (arg, ty) in args.iter().zip(param_types) {
-                    let v = self.compile_expr(builder, Some(ty), arg)?;
-                    arg_vals.push(v);
-                }
-                let call = builder.ins().call(func, &arg_vals);
-                let res = builder.inst_results(call);
-                if res.is_empty() {
-                    Ok(builder.ins().iconst(types::I8, 0))
+                if func_ctx.is_variadic {
+                    let mut arg_vals = vec![];
+                    for arg in args {
+                        let v = self.compile_expr(builder, None, arg)?;
+                        arg_vals.push(v);
+                    }
+                    let call = builder.ins().call(func, &arg_vals);
+
+                    let sig_ref = builder.func.dfg.call_signature(call).unwrap();
+                    let abi_params = arg_vals
+                        .into_iter()
+                        .map(|a| {
+                            let ty = builder.func.dfg.value_type(a);
+                            AbiParam::new(ty)
+                        })
+                        .collect::<Vec<AbiParam>>();
+
+                    builder.func.dfg.signatures[sig_ref].params = abi_params;
+
+                    let res = builder.inst_results(call);
+                    if res.is_empty() {
+                        Ok(builder.ins().iconst(types::I8, 0))
+                    } else {
+                        Ok(res[0])
+                    }
                 } else {
-                    Ok(res[0])
+                    let mut arg_vals = vec![];
+                    let param_types = func_ctx.param_types.clone();
+                    for (arg, ty) in args.iter().zip(param_types) {
+                        let v = self.compile_expr(builder, Some(ty), arg)?;
+                        arg_vals.push(v);
+                    }
+                    let call = builder.ins().call(func, &arg_vals);
+                    let res = builder.inst_results(call);
+                    if res.is_empty() {
+                        Ok(builder.ins().iconst(types::I8, 0))
+                    } else {
+                        Ok(res[0])
+                    }
                 }
             }
             Expression::BinaryOperation {
@@ -484,10 +511,11 @@ impl CodeGen {
                 }
             }
             Expression::UnaryOperation { value, operator } => {
+                let ty = self.type_of(ctx, value).unwrap();
                 let val = self.compile_expr(builder, type_hint.clone(), value)?;
                 match operator {
                     crate::ast::UnaryOperator::Dereference => Ok(builder.ins().load(
-                        self.to_cranelift_type(&type_hint.unwrap()).unwrap(),
+                        self.to_cranelift_type(&ty).unwrap(),
                         MemFlags::new(),
                         val,
                         Offset32::new(0),
@@ -515,7 +543,16 @@ impl CodeGen {
 
     fn type_of(&self, ctx: &FunctionContext, value: &Expression) -> Option<TblType> {
         match value {
-            Expression::Literal(_) => None,
+            Expression::Literal(l) => match l {
+                crate::ast::Literal::Int(_) => None,
+                crate::ast::Literal::String(_) => {
+                    Some(TblType::Pointer(Box::new(TblType::Integer {
+                        signed: false,
+                        width: 8,
+                    })))
+                }
+                crate::ast::Literal::Bool(_) => Some(TblType::Bool),
+            },
             Expression::Var(v) => ctx.vars.get(v).map(|var| var.type_.clone()),
             Expression::Call { task, .. } => self
                 .functions
