@@ -1,8 +1,8 @@
-use std::{collections::HashMap, fs::File, sync::Arc};
+use std::{fs::File, sync::Arc};
 
 use cranelift::{
     codegen::{
-        ir::{immediates::Offset32, Function, StackSlot, UserFuncName},
+        ir::{immediates::Offset32, Function, UserFuncName},
         isa::TargetIsa,
         Context,
     },
@@ -15,69 +15,23 @@ use tracing::info;
 
 use crate::ast::{Declaration, Expression, ExternTaskParams, Program, Statement, Type as TblType};
 
+use super::{
+    context::{CodeGenContext, FunctionContext, StructContext},
+    debug_info::DebugInfoGenerator,
+    Config,
+};
+
 pub struct CodeGen {
     mod_name: String,
     obj_module: ObjectModule,
-    functions: Vec<FunctionContext>,
-    types: Vec<StructContext>,
-}
-
-#[derive(Clone, Debug)]
-struct StructContext {
-    name: String,
-    members: Vec<(String, TblType)>,
-}
-
-impl StructContext {
-    fn member_ty(&self, idx: usize) -> &TblType {
-        &self.members[idx].1
-    }
-}
-
-#[derive(Clone, Debug)]
-struct FunctionContext {
-    name: String,
-    param_types: Vec<TblType>,
-    returns: Option<TblType>,
-    vars: HashMap<String, VarInfo>,
-    func_id: FuncId,
-    is_variadic: bool,
-}
-
-impl FunctionContext {
-    fn new(
-        name: String,
-        id: FuncId,
-        param_types: Vec<TblType>,
-        returns: Option<TblType>,
-        is_variadic: bool,
-    ) -> Self {
-        Self {
-            name,
-            param_types,
-            returns,
-            vars: HashMap::new(),
-            func_id: id,
-            is_variadic,
-        }
-    }
-
-    fn declare_var(&mut self, name: &str, type_: TblType, slot: StackSlot) -> VarInfo {
-        self.vars.insert(name.to_string(), VarInfo { slot, type_ });
-        self.vars[name].clone()
-    }
-}
-
-#[derive(Debug, Clone)]
-struct VarInfo {
-    slot: StackSlot,
-    type_: TblType,
+    ctx: CodeGenContext,
+    dig: DebugInfoGenerator,
 }
 
 impl CodeGen {
     pub fn new(mod_name: String, target: Arc<dyn TargetIsa>) -> miette::Result<Self> {
         let obj_builder = ObjectBuilder::new(
-            target,
+            target.clone(),
             mod_name.bytes().collect::<Vec<_>>(),
             cranelift_module::default_libcall_names(),
         )
@@ -85,8 +39,8 @@ impl CodeGen {
         Ok(Self {
             mod_name,
             obj_module: ObjectModule::new(obj_builder),
-            functions: Vec::new(),
-            types: Vec::new(),
+            ctx: CodeGenContext::default(),
+            dig: DebugInfoGenerator::new(target),
         })
     }
 
@@ -98,17 +52,13 @@ impl CodeGen {
         returns: Option<TblType>,
         is_variadic: bool,
     ) -> usize {
-        self.functions.push(FunctionContext::new(
+        self.ctx.insert_function(
             name.to_string(),
-            id,
-            param_types,
-            returns,
-            is_variadic,
-        ));
-        self.functions.len() - 1
+            FunctionContext::new(id, param_types, returns, is_variadic),
+        )
     }
 
-    pub fn compile(mut self, program: Program) -> miette::Result<()> {
+    pub fn compile(mut self, program: Program, config: Config) -> miette::Result<()> {
         for decl in &program.declarations {
             match decl {
                 Declaration::ExternTask {
@@ -189,7 +139,7 @@ impl CodeGen {
 
                     for (idx, (arg, type_)) in params.iter().enumerate() {
                         let ty = self.to_cranelift_type(type_).unwrap();
-                        let fn_ctx = &mut self.functions[fn_idx];
+                        let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
                         let data = StackSlotData::new(StackSlotKind::ExplicitSlot, ty.bytes());
                         let slot = func_builder.create_sized_stack_slot(data);
                         let params = func_builder.block_params(fn_entry);
@@ -222,16 +172,23 @@ impl CodeGen {
                         .define_function(func_id, &mut ctx)
                         .into_diagnostic()?;
                 }
-                Declaration::Struct { name, members } => self.types.push(StructContext {
-                    name: name.clone(),
-                    members: members.clone(),
-                }),
+                Declaration::Struct { name, members } => self.ctx.insert_type(
+                    name.clone(),
+                    StructContext {
+                        members: members.clone(),
+                    },
+                ),
             }
         }
 
         self.build_start()?;
 
-        let res = self.obj_module.finish();
+        let mut res = self.obj_module.finish();
+
+        if config.is_debug {
+            self.dig.generate(&self.ctx, &mut res)?;
+        }
+
         let obj_name = format!("{}.o", self.mod_name.trim_end_matches(".tbl"));
         let mut file = File::create(obj_name).into_diagnostic()?;
         res.object.write_stream(&mut file).unwrap();
@@ -256,11 +213,7 @@ impl CodeGen {
         func_builder.switch_to_block(fn_entry);
         func_builder.seal_block(fn_entry);
 
-        let main_ctx = self
-            .functions
-            .iter()
-            .find(|f| f.name == "_main")
-            .ok_or(miette!("No main function found"))?;
+        let main_ctx = &self.ctx.functions["_main"];
         let main_fn = self
             .obj_module
             .declare_func_in_func(main_ctx.func_id, func_builder.func);
@@ -282,7 +235,7 @@ impl CodeGen {
         stmt: &Statement,
     ) -> miette::Result<()> {
         let fn_idx = func_builder.func.name.get_user().unwrap().index;
-        let ctx = &self.functions[fn_idx as usize];
+        let ctx = &self.ctx.func_by_idx(fn_idx as usize);
         match stmt {
             crate::ast::Statement::Conditional { test, then, else_ } => {
                 let then_block = func_builder.create_block();
@@ -326,7 +279,7 @@ impl CodeGen {
             }
             crate::ast::Statement::PointerAssign { ptr, value } => {
                 let var = {
-                    let fn_ctx = &self.functions[fn_idx as usize];
+                    let fn_ctx = &self.ctx.func_by_idx(fn_idx as usize);
                     fn_ctx.vars[ptr].clone()
                 };
                 let var_addr = func_builder.ins().stack_load(
@@ -358,17 +311,12 @@ impl CodeGen {
                     unreachable!()
                 };
                 let var = {
-                    let fn_ctx = &self.functions[fn_idx as usize];
+                    let fn_ctx = &self.ctx.func_by_idx(fn_idx as usize);
                     fn_ctx.vars[name].clone()
                 };
 
                 let ty_name = var.type_.name();
-                let ty = &self
-                    .types
-                    .iter()
-                    .find(|t| t.name == ty_name)
-                    .ok_or(miette!("Unknown struct type `{ty_name}`"))?
-                    .members;
+                let ty = &self.ctx.types[&ty_name].members;
 
                 let mut offset = 0;
                 let mut idx = 0;
@@ -386,7 +334,10 @@ impl CodeGen {
             crate::ast::Statement::VarDecl { name, type_, value } => {
                 let data = StackSlotData::new(StackSlotKind::ExplicitSlot, self.type_size(type_));
                 let slot = func_builder.create_sized_stack_slot(data);
-                let fn_ctx = &mut self.functions[fn_idx as usize];
+                let fn_ctx = self
+                    .ctx
+                    .func_by_idx_mut(fn_idx as usize)
+                    .ok_or(miette!("Could not find function with ID {fn_idx}"))?;
                 fn_ctx.declare_var(name, type_.clone(), slot);
                 match type_ {
                     TblType::Named(name) => {
@@ -394,11 +345,10 @@ impl CodeGen {
                         else {
                             unreachable!()
                         };
-                        let struct_ty =
-                            self.types.iter().find(|t| &t.name == name).unwrap().clone();
+                        let struct_ty = self.ctx.types[name].clone();
                         let mut current_offset = 0;
                         for (idx, (_, value)) in members.iter().enumerate() {
-                            let member_ty = struct_ty.member_ty(idx).clone();
+                            let member_ty: TblType = struct_ty.member_ty(idx).clone();
                             let val =
                                 self.compile_expr(func_builder, Some(member_ty.clone()), value)?;
                             func_builder.ins().stack_store(
@@ -419,7 +369,7 @@ impl CodeGen {
             }
             crate::ast::Statement::VarAssign { name, value } => {
                 let var = {
-                    let fn_ctx = &self.functions[fn_idx as usize];
+                    let fn_ctx = &self.ctx.func_by_idx(fn_idx as usize);
                     fn_ctx.vars[name].clone()
                 };
                 let val = self.compile_expr(func_builder, Some(var.type_), value)?;
@@ -438,7 +388,7 @@ impl CodeGen {
         expr: &Expression,
     ) -> miette::Result<Value> {
         let fn_idx = builder.func.name.get_user().unwrap().index;
-        let ctx = &self.functions[fn_idx as usize];
+        let ctx = &self.ctx.func_by_idx(fn_idx as usize);
         match expr {
             Expression::Literal(literal) => match literal {
                 crate::ast::Literal::Int(i) => {
@@ -491,7 +441,7 @@ impl CodeGen {
                 ))
             }
             Expression::Call { task, args } => {
-                let func_ctx = self.functions.iter().find(|f| &f.name == task).unwrap();
+                let func_ctx = &self.ctx.functions[task];
                 let func = self
                     .obj_module
                     .declare_func_in_func(func_ctx.func_id, builder.func);
@@ -606,7 +556,7 @@ impl CodeGen {
                                 "Cannot take reference to something other than a variable"
                             ));
                         };
-                        let ctx = &self.functions[fn_idx as usize];
+                        let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                         let var = &ctx.vars[&v];
                         Ok(builder.ins().stack_addr(
                             self.obj_module.target_config().pointer_type(),
@@ -622,12 +572,7 @@ impl CodeGen {
                 };
                 let var = &ctx.vars[val];
                 let ty_name = var.type_.name();
-                let ty = &self
-                    .types
-                    .iter()
-                    .find(|t| t.name == ty_name)
-                    .ok_or(miette!("Unknown struct type `{val}`"))?
-                    .members;
+                let ty = &self.ctx.types[&ty_name].members;
 
                 let mut offset = 0;
                 let mut idx = 0;
@@ -660,11 +605,7 @@ impl CodeGen {
                 crate::ast::Literal::Struct(_) => None,
             },
             Expression::Var(v) => ctx.vars.get(v).map(|var| var.type_.clone()),
-            Expression::Call { task, .. } => self
-                .functions
-                .iter()
-                .find(|f| &f.name == task)
-                .map(|t| t.returns.clone())?,
+            Expression::Call { task, .. } => self.ctx.functions[task].returns.clone(),
             Expression::BinaryOperation { left, right, .. } => {
                 if let Some(ty) = self.type_of(ctx, left) {
                     Some(ty)
@@ -673,7 +614,7 @@ impl CodeGen {
                 }
             }
             Expression::UnaryOperation { value, .. } => self.type_of(ctx, value),
-            Expression::StructAccess { value, member } => {
+            Expression::StructAccess { .. } => {
                 // TODO: check member type
                 None
             }
@@ -699,7 +640,7 @@ impl CodeGen {
             Some(t) => t.bytes(),
             None => match type_ {
                 TblType::Named(name) => {
-                    let ty = self.types.iter().find(|t| &t.name == name).unwrap();
+                    let ty = &self.ctx.types[name];
                     ty.members.iter().map(|(_, t)| self.type_size(t)).sum()
                 }
                 _ => unreachable!(),

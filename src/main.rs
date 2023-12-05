@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use ast::Program;
 use clap::Parser as ArgParser;
-use codegen::CodeGen;
+use codegen::{CodeGen, Config};
 use cranelift::prelude::{
     isa::lookup,
     settings::{self, Flags},
@@ -11,7 +11,6 @@ use cranelift::prelude::{
 use miette::{miette, IntoDiagnostic};
 use pest::{iterators::Pair, Parser};
 use pest_derive::Parser;
-use tracing::info;
 use tracing_subscriber::FmtSubscriber;
 
 use crate::ast::parse_decl;
@@ -27,6 +26,9 @@ struct TblParser;
 #[derive(ArgParser)]
 #[command(author, version, about)]
 struct Args {
+    /// Whether to include debug info
+    #[arg(short = 'g', default_value_t = true)]
+    is_debug: bool,
     /// File to compile
     file: PathBuf,
 }
@@ -58,13 +60,14 @@ fn link(file: &str) -> miette::Result<()> {
                 "-o",
                 elf_name,
                 "-dynamic-linker",
-                "/lib/ld-linux-x86-64.so.2",
-                "/usr/lib/crt1.o",
-                "/usr/lib/crti.o",
-                "-L/usr/lib",
+                //"/lib/ld-linux-x86-64.so.2",
+                "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+                "/usr/lib/x86_64-linux-gnu/crt1.o",
+                "/usr/lib/x86_64-linux-gnu/crti.o",
+                "-L/usr/lib/x86_64-linux-gnu",
                 "-lc",
                 &obj_name,
-                "/usr/lib/crtn.o",
+                "/usr/lib/x86_64-linux-gnu/crtn.o",
             ])
             .spawn()
             .into_diagnostic()?
@@ -116,7 +119,10 @@ fn main() -> miette::Result<()> {
         .to_string_lossy()
         .into_owned();
     let codegen = CodeGen::new(mod_name.clone(), target)?;
-    codegen.compile(program)?;
+    let config = Config {
+        is_debug: args.is_debug,
+    };
+    codegen.compile(program, config)?;
     link(&mod_name)?;
     Ok(())
 }
