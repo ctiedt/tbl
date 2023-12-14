@@ -202,8 +202,6 @@ impl CodeGen {
             }
         }
 
-        //self.build_start()?;
-
         let mut res = self.obj_module.finish();
 
         if self.config.is_debug {
@@ -214,39 +212,6 @@ impl CodeGen {
         let mut file = File::create(obj_name).into_diagnostic()?;
         res.object.write_stream(&mut file).unwrap();
 
-        Ok(())
-    }
-
-    fn build_start(&mut self) -> miette::Result<()> {
-        let sig = Signature::new(self.obj_module.isa().default_call_conv());
-        let func_id = self
-            .obj_module
-            .declare_function("main", cranelift_module::Linkage::Export, &sig)
-            .into_diagnostic()?;
-        let mut func = Function::new();
-        func.signature = sig;
-
-        let mut func_ctx = FunctionBuilderContext::new();
-        let mut func_builder = FunctionBuilder::new(&mut func, &mut func_ctx);
-
-        let fn_entry = func_builder.create_block();
-        func_builder.append_block_params_for_function_params(fn_entry);
-        func_builder.switch_to_block(fn_entry);
-        func_builder.seal_block(fn_entry);
-
-        let main_ctx = &self.ctx.functions["_main"];
-        let main_fn = self
-            .obj_module
-            .declare_func_in_func(main_ctx.func_id, func_builder.func);
-        func_builder.ins().call(main_fn, &[]);
-        func_builder.ins().return_(&[]);
-
-        info!("{}", func.display());
-
-        let mut ctx = Context::for_function(func);
-        self.obj_module
-            .define_function(func_id, &mut ctx)
-            .into_diagnostic()?;
         Ok(())
     }
 

@@ -616,16 +616,6 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
 fn parse_binop(mut pairs: Pairs<'_, Rule>) -> miette::Result<Expression> {
     match pairs.len() {
         1 => parse_expr(pairs.next().unwrap()),
-        3 => {
-            let left = Box::new(parse_expr(pairs.next().unwrap())?);
-            let operator: BinaryOperator = pairs.next().unwrap().as_str().parse()?;
-            let right = Box::new(parse_expr(pairs.next().unwrap())?);
-            Ok(Expression::BinaryOperation {
-                left,
-                right,
-                operator,
-            })
-        }
         n => {
             assert_eq!(n % 2, 1);
             // TODO: Check if this respects precedence

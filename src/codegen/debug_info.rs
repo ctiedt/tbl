@@ -5,7 +5,7 @@ use cranelift::codegen::{
         self,
         write::{
             Address, AttributeValue, DwarfUnit, EndianVec, FileId, LineProgram, LineString,
-            Sections, StringId, UnitEntryId, Writer,
+            Sections, UnitEntryId, Writer,
         },
         DW_ATE_unsigned, DW_AT_byte_size, DW_AT_comp_dir, DW_AT_decl_column, DW_AT_decl_file,
         DW_AT_decl_line, DW_AT_encoding, DW_AT_external, DW_AT_frame_base, DW_AT_high_pc,
@@ -30,7 +30,6 @@ use cranelift_module::FuncId;
 
 pub struct DebugInfoGenerator {
     dwarf: DwarfUnit,
-    filename: StringId,
     type_defs: HashMap<String, UnitEntryId>,
     file_id: FileId,
 }
@@ -47,16 +46,6 @@ impl DebugInfoGenerator {
         let only_filename = config.filename.file_name().unwrap().to_str().unwrap();
         let dirname = std::env::current_dir().unwrap();
         let dirname = dirname.to_str().unwrap();
-
-        let filename = dwarf.strings.add(
-            config
-                .filename
-                .canonicalize()
-                .unwrap()
-                .as_os_str()
-                .as_encoded_bytes()
-                .to_vec(),
-        );
 
         let mut line_program = LineProgram::new(
             encoding,
@@ -98,7 +87,6 @@ impl DebugInfoGenerator {
 
         Self {
             dwarf,
-            filename,
             type_defs: HashMap::new(),
             file_id,
         }
