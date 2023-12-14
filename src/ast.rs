@@ -104,10 +104,6 @@ pub enum Statement {
     },
     Exit,
     Expression(Expression),
-    PointerAssign {
-        ptr: String,
-        value: Expression,
-    },
     Return(Option<Expression>),
     Schedule {
         task: String,
@@ -118,13 +114,8 @@ pub enum Statement {
         type_: Type,
         value: Expression,
     },
-    VarAssign {
-        name: String,
-        value: Expression,
-    },
-    StructAssign {
-        var: Expression,
-        member: String,
+    Assign {
+        location: Expression,
         value: Expression,
     },
 }
@@ -134,7 +125,7 @@ pub enum Expression {
     Literal(Literal),
     Var(String),
     Call {
-        task: String,
+        task: Box<Expression>,
         args: Vec<Expression>,
     },
     BinaryOperation {
@@ -149,6 +140,10 @@ pub enum Expression {
     StructAccess {
         value: Box<Expression>,
         member: String,
+    },
+    Cast {
+        value: Box<Expression>,
+        to: Type,
     },
 }
 
@@ -439,64 +434,26 @@ pub fn parse_stmt(tokens: Pair<'_, Rule>) -> miette::Result<Statement> {
             )?;
             Ok(Statement::VarDecl { name, type_, value })
         }
-        Some("var_assign") => {
+        Some("assign") => {
             let inner = pair.into_inner();
-            let name = inner
-                .find_first_tagged("name")
-                .ok_or(miette!("Variable has no name"))?
-                .as_str()
-                .to_string();
+            let location = parse_expr(
+                inner
+                    .find_first_tagged("location")
+                    .ok_or(miette!("Assignment has no location"))?
+                    .into_inner()
+                    .next()
+                    .unwrap(),
+            )?;
 
             let value = parse_expr(
                 inner
                     .find_first_tagged("value")
-                    .ok_or(miette!("Variable has no value"))?
+                    .ok_or(miette!("Assignment has no value"))?
                     .into_inner()
                     .next()
                     .ok_or(miette!("Variable value should contain a pair"))?,
             )?;
-            Ok(Statement::VarAssign { name, value })
-        }
-        Some("ptr_assign") => {
-            let inner = pair.into_inner();
-            let ptr = inner
-                .find_first_tagged("ptr")
-                .ok_or(miette!("Variable has no name"))?
-                .as_str()
-                .to_string();
-            let value = parse_expr(
-                inner
-                    .find_first_tagged("value")
-                    .ok_or(miette!("Variable has no value"))?
-                    .into_inner()
-                    .next()
-                    .ok_or(miette!("Variable value should contain a pair"))?,
-            )?;
-            Ok(Statement::PointerAssign { ptr, value })
-        }
-        Some("struct_assign") => {
-            let inner = pair.into_inner();
-            let var = Expression::Var(
-                inner
-                    .find_first_tagged("struct")
-                    .ok_or(miette!("Variable has no name"))?
-                    .as_str()
-                    .to_string(),
-            );
-            let member = inner
-                .find_first_tagged("member")
-                .ok_or(miette!("Struct access has no member"))?
-                .as_str()
-                .to_string();
-            let value = parse_expr(
-                inner
-                    .find_first_tagged("value")
-                    .ok_or(miette!("Variable has no value"))?
-                    .into_inner()
-                    .next()
-                    .ok_or(miette!("Variable value should contain a pair"))?,
-            )?;
-            Ok(Statement::StructAssign { var, member, value })
+            Ok(Statement::Assign { location, value })
         }
         Some(t) => Err(miette!("Unknown tag for statement `{t}`")),
         None => Err(miette!("Statement `{}` is untagged", pair.as_str())),
@@ -517,6 +474,47 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
                         let operator: UnaryOperator = pairs.next().unwrap().as_str().parse()?;
                         let value = Box::new(parse_expr(pairs.next().unwrap())?);
                         Ok(Expression::UnaryOperation { value, operator })
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Rule::postfix => {
+                let mut pairs = tokens.into_inner();
+                match pairs.len() {
+                    1 => parse_expr(pairs.next().unwrap()),
+                    2 => {
+                        let value = Box::new(parse_expr(pairs.next().unwrap())?);
+                        let op = pairs.next().unwrap();
+                        match op.as_node_tag() {
+                            Some("struct_access") => {
+                                let member: String = op
+                                    .into_inner()
+                                    .clone()
+                                    .find_first_tagged("member")
+                                    .ok_or(miette!("Struct access needs a member"))?
+                                    .as_str()
+                                    .to_string();
+
+                                Ok(Expression::StructAccess { value, member })
+                            }
+                            Some("cast") => {
+                                todo!()
+                            }
+                            Some("call") => {
+                                let args: miette::Result<Vec<Expression>> = op
+                                    .into_inner()
+                                    .clone()
+                                    .find_tagged("arg")
+                                    .map(|p| parse_expr(p.into_inner().next().unwrap()))
+                                    .collect();
+
+                                Ok(Expression::Call {
+                                    task: value,
+                                    args: args?,
+                                })
+                            }
+                            _ => unreachable!(),
+                        }
                     }
                     _ => unreachable!(),
                 }
@@ -572,20 +570,6 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
             Rule::expression => {
                 let inner = tokens.into_inner().next().unwrap();
                 parse_expr(inner)
-            }
-            Rule::call => {
-                let pairs = tokens.into_inner();
-                let task = pairs
-                    .find_first_tagged("task")
-                    .ok_or(miette!("Task has no name"))?
-                    .as_str()
-                    .to_string();
-                let args: miette::Result<Vec<Expression>> = pairs
-                    .clone()
-                    .find_tagged("arg")
-                    .map(|p| parse_expr(p.into_inner().next().unwrap()))
-                    .collect();
-                Ok(Expression::Call { task, args: args? })
             }
             Rule::struct_access => {
                 let pairs = tokens.into_inner();

@@ -121,12 +121,7 @@ impl CodeGen {
                             .push(AbiParam::new(self.to_cranelift_type(ret).unwrap()));
                     }
 
-                    info!("{name} {:?}", params);
-
-                    //let name = match name.as_str() {
-                    //    "main" => "_main",
-                    //    other => other,
-                    //};
+                    info!("{name}({:?})", params);
 
                     let func_id = self
                         .obj_module
@@ -263,21 +258,6 @@ impl CodeGen {
             crate::ast::Statement::Expression(expr) => {
                 self.compile_expr(func_builder, None, expr)?;
             }
-            crate::ast::Statement::PointerAssign { ptr, value } => {
-                let var = {
-                    let fn_ctx = &self.ctx.func_by_idx(fn_idx as usize);
-                    fn_ctx.vars[ptr].clone()
-                };
-                let var_addr = func_builder.ins().stack_load(
-                    self.obj_module.target_config().pointer_type(),
-                    var.slot,
-                    Offset32::new(0),
-                );
-                let val = self.compile_expr(func_builder, Some(var.type_), value)?;
-                func_builder
-                    .ins()
-                    .store(MemFlags::new(), val, var_addr, Offset32::new(0));
-            }
             crate::ast::Statement::Return(v) => {
                 let mut return_values = vec![];
                 if let Some(expr) = v {
@@ -291,31 +271,6 @@ impl CodeGen {
             }
             crate::ast::Statement::Schedule { task, args } => {
                 func_builder.ins().return_(&[]);
-            }
-            crate::ast::Statement::StructAssign { var, member, value } => {
-                let Expression::Var(name) = var else {
-                    unreachable!()
-                };
-                let var = {
-                    let fn_ctx = &self.ctx.func_by_idx(fn_idx as usize);
-                    fn_ctx.vars[name].clone()
-                };
-
-                let ty_name = var.type_.name();
-                let ty = &self.ctx.types[&ty_name].members;
-
-                let mut offset = 0;
-                let mut idx = 0;
-                while &ty[idx].0 != member {
-                    offset += self.type_size(&ty[idx].1);
-                    idx += 1;
-                }
-
-                let value = self.compile_expr(func_builder, Some(ty[idx].1.clone()), value)?;
-
-                func_builder
-                    .ins()
-                    .stack_store(value, var.slot, Offset32::new(offset as i32));
             }
             crate::ast::Statement::VarDecl { name, type_, value } => {
                 let data = StackSlotData::new(StackSlotKind::ExplicitSlot, self.type_size(type_));
@@ -353,15 +308,13 @@ impl CodeGen {
                     }
                 }
             }
-            crate::ast::Statement::VarAssign { name, value } => {
-                let var = {
-                    let fn_ctx = &self.ctx.func_by_idx(fn_idx as usize);
-                    fn_ctx.vars[name].clone()
-                };
-                let val = self.compile_expr(func_builder, Some(var.type_), value)?;
+            crate::ast::Statement::Assign { location, value } => {
+                let ty = self.type_of(ctx, location);
+                let loc = self.compile_lvalue(func_builder, location)?;
+                let val = self.compile_expr(func_builder, ty, value)?;
                 func_builder
                     .ins()
-                    .stack_store(val, var.slot, Offset32::new(0));
+                    .store(MemFlags::new(), val, loc, Offset32::new(0));
             }
         }
         Ok(())
@@ -427,7 +380,11 @@ impl CodeGen {
                 ))
             }
             Expression::Call { task, args } => {
-                let func_ctx = &self.ctx.functions[task];
+                let task_name = match &**task {
+                    Expression::Var(t) => t,
+                    _ => unimplemented!(),
+                };
+                let func_ctx = &self.ctx.functions[task_name];
                 let func = self
                     .obj_module
                     .declare_func_in_func(func_ctx.func_id, builder.func);
@@ -574,6 +531,54 @@ impl CodeGen {
                     Offset32::new(offset as i32),
                 ))
             }
+            Expression::Cast { value, to } => {
+                todo!()
+            }
+        }
+    }
+
+    fn compile_lvalue(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        expr: &Expression,
+    ) -> miette::Result<Value> {
+        let fn_idx = builder.func.name.get_user().unwrap().index;
+        let ctx = &self.ctx.func_by_idx(fn_idx as usize);
+        match expr {
+            Expression::Var(v) => {
+                let var = ctx
+                    .vars
+                    .get(v)
+                    .ok_or(miette!("Variable `{v}` does not exist"))?;
+
+                Ok(builder.ins().stack_addr(
+                    self.obj_module.isa().pointer_type(),
+                    var.slot,
+                    Offset32::new(0),
+                ))
+            }
+            Expression::StructAccess { value, member } => {
+                let Expression::Var(ref val) = **value else {
+                    unreachable!()
+                };
+                let var = &ctx.vars[val];
+                let ty_name = var.type_.name();
+                let ty = &self.ctx.types[&ty_name].members;
+
+                let mut offset = 0;
+                let mut idx = 0;
+                while &ty[idx].0 != member {
+                    offset += self.type_size(&ty[idx].1);
+                    idx += 1;
+                }
+
+                Ok(builder.ins().stack_addr(
+                    self.obj_module.isa().pointer_type(),
+                    var.slot,
+                    Offset32::new(offset as i32),
+                ))
+            }
+            e => Err(miette!("Illegal expression for lvalue: {e:?}")),
         }
     }
 
@@ -591,7 +596,10 @@ impl CodeGen {
                 crate::ast::Literal::Struct(_) => None,
             },
             Expression::Var(v) => ctx.vars.get(v).map(|var| var.type_.clone()),
-            Expression::Call { task, .. } => self.ctx.functions[task].returns.clone(),
+            Expression::Call { task, .. } => match &**task {
+                Expression::Var(t) => self.ctx.functions[t].returns.clone(),
+                _ => None,
+            },
             Expression::BinaryOperation { left, right, .. } => {
                 if let Some(ty) = self.type_of(ctx, left) {
                     Some(ty)
@@ -600,10 +608,17 @@ impl CodeGen {
                 }
             }
             Expression::UnaryOperation { value, .. } => self.type_of(ctx, value),
-            Expression::StructAccess { .. } => {
+            Expression::StructAccess { value, member } => {
                 // TODO: check member type
-                None
+                let struct_name = match self.type_of(ctx, value).unwrap() {
+                    TblType::Named(n) => n,
+                    _ => unimplemented!(),
+                };
+                let struct_ty = &self.ctx.types[&struct_name];
+                let member_idx = struct_ty.member_idx(member);
+                Some(struct_ty.member_ty(member_idx).clone())
             }
+            Expression::Cast { to, .. } => Some(to.clone()),
         }
     }
 

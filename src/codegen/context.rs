@@ -58,6 +58,10 @@ impl StructContext {
     pub fn member_ty(&self, idx: usize) -> &TblType {
         &self.members[idx].1
     }
+
+    pub fn member_idx(&self, member: &str) -> usize {
+        self.members.iter().position(|(m, _)| m == member).unwrap()
+    }
 }
 
 #[derive(Clone, Debug)]
