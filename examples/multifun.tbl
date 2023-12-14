@@ -1,0 +1,23 @@
+extern task printf(...);
+
+task baz() {
+    printf("Hello from baz\n");
+    return;
+}
+
+task bar() {
+    printf("Hello from bar\n");
+    baz();
+    return;
+}
+
+task foo() {
+    printf("Hello from foo\n");
+    bar();
+    return;
+}
+
+task main() -> u32 {
+    foo();
+    return 0;
+}

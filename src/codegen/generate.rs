@@ -13,7 +13,9 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use miette::{miette, IntoDiagnostic};
 use tracing::info;
 
-use crate::ast::{Declaration, Expression, ExternTaskParams, Program, Statement, Type as TblType};
+use crate::ast::{
+    Declaration, Expression, ExternTaskParams, Location, Program, Statement, Type as TblType,
+};
 
 use super::{
     context::{CodeGenContext, FunctionContext, StructContext},
@@ -24,12 +26,17 @@ use super::{
 pub struct CodeGen {
     mod_name: String,
     obj_module: ObjectModule,
+    config: Config,
     ctx: CodeGenContext,
     dig: DebugInfoGenerator,
 }
 
 impl CodeGen {
-    pub fn new(mod_name: String, target: Arc<dyn TargetIsa>) -> miette::Result<Self> {
+    pub fn new(
+        mod_name: String,
+        target: Arc<dyn TargetIsa>,
+        config: Config,
+    ) -> miette::Result<Self> {
         let obj_builder = ObjectBuilder::new(
             target.clone(),
             mod_name.bytes().collect::<Vec<_>>(),
@@ -40,25 +47,29 @@ impl CodeGen {
             mod_name,
             obj_module: ObjectModule::new(obj_builder),
             ctx: CodeGenContext::default(),
-            dig: DebugInfoGenerator::new(target),
+            config: config.clone(),
+            dig: DebugInfoGenerator::new(target, config),
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_func<S: ToString>(
         &mut self,
         name: S,
         id: FuncId,
-        param_types: Vec<TblType>,
+        params: Vec<(String, TblType)>,
         returns: Option<TblType>,
         is_variadic: bool,
+        is_external: bool,
+        location: Location,
     ) -> usize {
         self.ctx.insert_function(
             name.to_string(),
-            FunctionContext::new(id, param_types, returns, is_variadic),
+            FunctionContext::new(id, params, returns, is_variadic, is_external, location),
         )
     }
 
-    pub fn compile(mut self, program: Program, config: Config) -> miette::Result<()> {
+    pub fn compile(mut self, program: Program) -> miette::Result<()> {
         for decl in &program.declarations {
             match decl {
                 Declaration::ExternTask {
@@ -86,12 +97,15 @@ impl CodeGen {
                     let _fn_idx = self.insert_func(
                         name,
                         id,
-                        args.types_only(),
+                        args.to_arg_vec(),
                         returns.clone(),
                         args.is_variadic(),
+                        true,
+                        Location::default(),
                     );
                 }
                 Declaration::Task {
+                    location,
                     name,
                     params,
                     returns,
@@ -109,10 +123,10 @@ impl CodeGen {
 
                     info!("{name} {:?}", params);
 
-                    let name = match name.as_str() {
-                        "main" => "_main",
-                        other => other,
-                    };
+                    //let name = match name.as_str() {
+                    //    "main" => "_main",
+                    //    other => other,
+                    //};
 
                     let func_id = self
                         .obj_module
@@ -122,9 +136,11 @@ impl CodeGen {
                     let fn_idx = self.insert_func(
                         name,
                         func_id,
-                        params.iter().map(|(_, ty)| ty.clone()).collect(),
+                        params.to_vec(),
                         returns.clone(),
                         false,
+                        false,
+                        *location,
                     );
                     let fn_name = UserFuncName::user(0, fn_idx as u32);
 
@@ -153,6 +169,11 @@ impl CodeGen {
                     for stmt in body {
                         self.compile_stmt(&mut func_builder, stmt)?;
                     }
+                    //if body.last().is_none()
+                    //    || !matches!(body.last().unwrap(), Statement::Return(_))
+                    //{
+                    //    self.compile_stmt(&mut func_builder, &Statement::Return(None))?;
+                    //}
 
                     func_builder.finalize();
                     info!("{}", func.display());
@@ -181,11 +202,11 @@ impl CodeGen {
             }
         }
 
-        self.build_start()?;
+        //self.build_start()?;
 
         let mut res = self.obj_module.finish();
 
-        if config.is_debug {
+        if self.config.is_debug {
             self.dig.generate(&self.ctx, &mut res)?;
         }
 
@@ -472,8 +493,8 @@ impl CodeGen {
                     }
                 } else {
                     let mut arg_vals = vec![];
-                    let param_types = func_ctx.param_types.clone();
-                    for (arg, ty) in args.iter().zip(param_types) {
+                    let param_types = func_ctx.params.clone();
+                    for (arg, (_, ty)) in args.iter().zip(param_types) {
                         let v = self.compile_expr(builder, Some(ty), arg)?;
                         arg_vals.push(v);
                     }

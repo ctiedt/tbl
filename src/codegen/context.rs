@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use cranelift::codegen::ir::StackSlot;
 use cranelift_module::FuncId;
 
-use crate::ast::Type as TblType;
+use crate::ast::{Location, Type as TblType};
 
 #[derive(Default)]
 pub struct CodeGenContext {
@@ -30,6 +30,23 @@ impl CodeGenContext {
     pub fn insert_type(&mut self, name: String, type_: StructContext) {
         self.types.insert(name, type_);
     }
+
+    pub fn type_size(&self, ty: &TblType, ptr_size: u8) -> u8 {
+        match ty {
+            TblType::Bool => 1,
+            TblType::Integer { width, .. } => width / 8,
+            TblType::Array { item, length } => self.type_size(item, ptr_size) * (*length as u8),
+            TblType::Pointer(_) => ptr_size,
+            TblType::Named(name) => {
+                let struct_ty = &self.types[name];
+                struct_ty
+                    .members
+                    .iter()
+                    .map(|(_, t)| self.type_size(t, ptr_size))
+                    .sum()
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -45,26 +62,32 @@ impl StructContext {
 
 #[derive(Clone, Debug)]
 pub struct FunctionContext {
-    pub param_types: Vec<TblType>,
+    pub params: Vec<(String, TblType)>,
     pub returns: Option<TblType>,
     pub vars: HashMap<String, VarInfo>,
     pub func_id: FuncId,
     pub is_variadic: bool,
+    pub is_external: bool,
+    pub location: Location,
 }
 
 impl FunctionContext {
     pub fn new(
         id: FuncId,
-        param_types: Vec<TblType>,
+        params: Vec<(String, TblType)>,
         returns: Option<TblType>,
         is_variadic: bool,
+        is_external: bool,
+        location: Location,
     ) -> Self {
         Self {
-            param_types,
+            params,
             returns,
             vars: HashMap::new(),
             func_id: id,
             is_variadic,
+            is_external,
+            location,
         }
     }
 

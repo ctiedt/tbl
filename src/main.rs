@@ -60,14 +60,13 @@ fn link(file: &str) -> miette::Result<()> {
                 "-o",
                 elf_name,
                 "-dynamic-linker",
-                //"/lib/ld-linux-x86-64.so.2",
-                "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-                "/usr/lib/x86_64-linux-gnu/crt1.o",
-                "/usr/lib/x86_64-linux-gnu/crti.o",
-                "-L/usr/lib/x86_64-linux-gnu",
+                "/usr/lib/ld-linux-x86-64.so.2",
+                "/usr/lib/crt1.o",
+                "/usr/lib/crti.o",
+                "-L/usr/lib",
                 "-lc",
                 &obj_name,
-                "/usr/lib/x86_64-linux-gnu/crtn.o",
+                "/usr/lib/crtn.o",
             ])
             .spawn()
             .into_diagnostic()?
@@ -118,11 +117,12 @@ fn main() -> miette::Result<()> {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let codegen = CodeGen::new(mod_name.clone(), target)?;
     let config = Config {
         is_debug: args.is_debug,
+        filename: args.file,
     };
-    codegen.compile(program, config)?;
+    let codegen = CodeGen::new(mod_name.clone(), target, config)?;
+    codegen.compile(program)?;
     link(&mod_name)?;
     Ok(())
 }

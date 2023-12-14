@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use miette::{miette, Diagnostic, IntoDiagnostic};
-use pest::iterators::Pair;
+use pest::iterators::{Pair, Pairs};
 use thiserror::Error;
 
 use crate::Rule;
@@ -10,6 +10,22 @@ use crate::Rule;
 pub enum ParseError {
     #[error("unknown operator")]
     UnknownOperator(String),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Location {
+    pub line: u64,
+    pub column: u64,
+}
+
+impl From<pest::Span<'_>> for Location {
+    fn from(value: pest::Span) -> Self {
+        let (line, column) = value.start_pos().line_col();
+        Self {
+            line: line as u64,
+            column: column as u64,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,12 +67,10 @@ impl ExternTaskParams {
         matches!(self, ExternTaskParams::Variadic)
     }
 
-    pub fn types_only(&self) -> Vec<Type> {
+    pub fn to_arg_vec(&self) -> Vec<(String, Type)> {
         match self {
             ExternTaskParams::Variadic => vec![],
-            ExternTaskParams::WellKnown(params) => {
-                params.iter().map(|(_, ty)| ty.clone()).collect()
-            }
+            ExternTaskParams::WellKnown(params) => params.to_vec(),
         }
     }
 }
@@ -69,6 +83,7 @@ pub enum Declaration {
         returns: Option<Type>,
     },
     Task {
+        location: Location,
         name: String,
         params: Vec<(String, Type)>,
         returns: Option<Type>,
@@ -264,6 +279,7 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
         .ok_or(miette!("Declaration should contain one inner pair"))?;
     match pair.as_rule() {
         Rule::task => {
+            let location = pair.as_span().into();
             let pairs = pair.into_inner();
             let name = pairs
                 .find_first_tagged("name")
@@ -289,6 +305,7 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
             let body = body?;
 
             Ok(Declaration::Task {
+                location,
                 name,
                 params,
                 returns,
@@ -489,7 +506,9 @@ pub fn parse_stmt(tokens: Pair<'_, Rule>) -> miette::Result<Statement> {
 pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
     match tokens.as_node_tag() {
         Some("test") | None => match tokens.as_rule() {
-            Rule::equality | Rule::comparison | Rule::term | Rule::factor => parse_binop(tokens),
+            Rule::equality | Rule::comparison | Rule::term | Rule::factor => {
+                parse_binop(tokens.into_inner())
+            }
             Rule::unary => {
                 let mut pairs = tokens.into_inner();
                 match pairs.len() {
@@ -594,8 +613,7 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
     }
 }
 
-fn parse_binop(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
-    let mut pairs = tokens.into_inner();
+fn parse_binop(mut pairs: Pairs<'_, Rule>) -> miette::Result<Expression> {
     match pairs.len() {
         1 => parse_expr(pairs.next().unwrap()),
         3 => {
@@ -608,6 +626,17 @@ fn parse_binop(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
                 operator,
             })
         }
-        _ => unreachable!(),
+        n => {
+            assert_eq!(n % 2, 1);
+            // TODO: Check if this respects precedence
+            let left = Box::new(parse_expr(pairs.next().unwrap())?);
+            let operator: BinaryOperator = pairs.next().unwrap().as_str().parse()?;
+            let right = parse_binop(pairs)?;
+            Ok(Expression::BinaryOperation {
+                left,
+                right: Box::new(right),
+                operator,
+            })
+        }
     }
 }
