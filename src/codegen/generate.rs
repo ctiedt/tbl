@@ -532,7 +532,31 @@ impl CodeGen {
                 ))
             }
             Expression::Cast { value, to } => {
-                todo!()
+                let current_ty = self
+                    .type_of(ctx, value)
+                    .ok_or(miette!("Type to cast from must be known"))?;
+                let val = self.compile_expr(builder, Some(current_ty.clone()), value)?;
+                match (current_ty, to.clone()) {
+                    (
+                        TblType::Integer {
+                            width: from_width, ..
+                        },
+                        TblType::Integer {
+                            width: to_width, ..
+                        },
+                    ) => {
+                        if to_width > from_width {
+                            Ok(builder
+                                .ins()
+                                .uextend(self.to_cranelift_type(to).unwrap(), val))
+                        } else {
+                            Ok(builder
+                                .ins()
+                                .ireduce(self.to_cranelift_type(to).unwrap(), val))
+                        }
+                    }
+                    _ => unimplemented!(),
+                }
             }
         }
     }

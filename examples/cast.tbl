@@ -1,0 +1,13 @@
+extern task printf(...);
+
+task add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+
+task main() -> u32 {
+    var x: u32 = 3;
+    var y: u8 = 2;
+    var z: u32 = add(x, y as u32);
+    printf("%d + %d = %d\n", x, y, z);
+    return 0;
+}

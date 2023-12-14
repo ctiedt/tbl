@@ -498,7 +498,14 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
                                 Ok(Expression::StructAccess { value, member })
                             }
                             Some("cast") => {
-                                todo!()
+                                let to = parse_type(
+                                    op.into_inner()
+                                        .clone()
+                                        .find_first_tagged("to")
+                                        .ok_or(miette!("Cast needs a target type"))?,
+                                )?;
+
+                                Ok(Expression::Cast { value, to })
                             }
                             Some("call") => {
                                 let args: miette::Result<Vec<Expression>> = op
