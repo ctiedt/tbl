@@ -36,10 +36,20 @@ pub struct Program {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
     Bool,
-    Integer { signed: bool, width: u8 },
-    Array { item: Box<Type>, length: u64 },
+    Integer {
+        signed: bool,
+        width: u8,
+    },
+    Array {
+        item: Box<Type>,
+        length: u64,
+    },
     Pointer(Box<Type>),
     Named(String),
+    TaskPtr {
+        params: Vec<Type>,
+        returns: Option<Box<Type>>,
+    },
 }
 
 impl Type {
@@ -52,6 +62,21 @@ impl Type {
             Type::Array { item, length } => format!("[{}; {length}]", item.name()),
             Type::Pointer(t) => format!("&{}", t.name()),
             Type::Named(n) => n.to_string(),
+            Type::TaskPtr { params, returns } => {
+                format!(
+                    "task({}){}",
+                    params
+                        .iter()
+                        .map(|p| p.name())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if let Some(returns) = returns {
+                        format!(" -> {}", returns.name())
+                    } else {
+                        "".to_string()
+                    }
+                )
+            }
         }
     }
 }
@@ -263,6 +288,19 @@ pub fn parse_type(tokens: Pair<'_, Rule>) -> miette::Result<Type> {
             Ok(Type::Pointer(Box::new(inner)))
         }
         Rule::ident => Ok(Type::Named(pair.as_str().to_owned())),
+        Rule::task_ptr => {
+            let inner = pair.into_inner();
+            let types: miette::Result<Vec<Type>> =
+                inner.clone().find_tagged("type").map(parse_type).collect();
+            let returns = inner
+                .find_first_tagged("returns")
+                .map(parse_type)
+                .transpose();
+            Ok(Type::TaskPtr {
+                params: types?,
+                returns: returns?.map(|r| Box::new(r)),
+            })
+        }
         _ => unreachable!(),
     }
 }

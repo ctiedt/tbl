@@ -222,16 +222,17 @@ impl DebugInfoGenerator {
             let param_id = self.dwarf.unit.add(dwarf_fn, DW_TAG_formal_parameter);
             let param_die = self.dwarf.unit.get_mut(param_id);
 
-            let prim_ty = self.type_defs[&ty.name()];
+            if let Some(prim_ty) = self.type_defs.get(&ty.name()) {
+                param_die.set(DW_AT_type, AttributeValue::UnitRef(*prim_ty));
+                param_die.set(
+                    DW_AT_location,
+                    AttributeValue::Block(vec![DW_OP_fbreg.0, param_offset]),
+                );
+            }
 
             param_die.set(
                 DW_AT_name,
                 AttributeValue::StringRef(self.dwarf.strings.add(name.as_str())),
-            );
-            param_die.set(DW_AT_type, AttributeValue::UnitRef(prim_ty));
-            param_die.set(
-                DW_AT_location,
-                AttributeValue::Block(vec![DW_OP_fbreg.0, param_offset]),
             );
 
             param_offset += ctx.type_size(ty, self.dwarf.unit.address_size());

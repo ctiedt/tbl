@@ -45,6 +45,7 @@ impl CodeGenContext {
                     .map(|(_, t)| self.type_size(t, ptr_size))
                     .sum()
             }
+            TblType::TaskPtr { .. } => ptr_size,
         }
     }
 }

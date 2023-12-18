@@ -368,64 +368,110 @@ impl CodeGen {
                     unimplemented!()
                 }
             },
-            Expression::Var(v) => {
-                let var = ctx
-                    .vars
-                    .get(v)
-                    .ok_or(miette!("Variable `{v}` does not exist"))?;
-                Ok(builder.ins().stack_load(
+            Expression::Var(v) => match ctx.vars.get(v) {
+                Some(var) => Ok(builder.ins().stack_load(
                     self.to_cranelift_type(&var.type_).unwrap(),
                     var.slot,
                     Offset32::new(0),
-                ))
-            }
+                )),
+                None => {
+                    let var = self
+                        .ctx
+                        .functions
+                        .get(v)
+                        .ok_or(miette!("No variable or function with name `{v}` exists"))?;
+
+                    let func_id = self
+                        .obj_module
+                        .declare_func_in_func(var.func_id, builder.func);
+                    Ok(builder
+                        .ins()
+                        .func_addr(self.obj_module.isa().pointer_type(), func_id))
+                }
+            },
             Expression::Call { task, args } => {
                 let task_name = match &**task {
                     Expression::Var(t) => t,
                     _ => unimplemented!(),
                 };
-                let func_ctx = &self.ctx.functions[task_name];
-                let func = self
-                    .obj_module
-                    .declare_func_in_func(func_ctx.func_id, builder.func);
-                if func_ctx.is_variadic {
-                    let mut arg_vals = vec![];
-                    for arg in args {
-                        let v = self.compile_expr(builder, None, arg)?;
-                        arg_vals.push(v);
-                    }
-                    let call = builder.ins().call(func, &arg_vals);
+                match self.ctx.functions.get(task_name) {
+                    Some(func_ctx) => {
+                        let func = self
+                            .obj_module
+                            .declare_func_in_func(func_ctx.func_id, builder.func);
 
-                    let sig_ref = builder.func.dfg.call_signature(call).unwrap();
-                    let abi_params = arg_vals
-                        .into_iter()
-                        .map(|a| {
-                            let ty = builder.func.dfg.value_type(a);
-                            AbiParam::new(ty)
-                        })
-                        .collect::<Vec<AbiParam>>();
+                        if func_ctx.is_variadic {
+                            let mut arg_vals = vec![];
+                            for arg in args {
+                                let v = self.compile_expr(builder, None, arg)?;
+                                arg_vals.push(v);
+                            }
+                            let call = builder.ins().call(func, &arg_vals);
 
-                    builder.func.dfg.signatures[sig_ref].params = abi_params;
+                            let sig_ref = builder.func.dfg.call_signature(call).unwrap();
+                            let abi_params = arg_vals
+                                .into_iter()
+                                .map(|a| {
+                                    let ty = builder.func.dfg.value_type(a);
+                                    AbiParam::new(ty)
+                                })
+                                .collect::<Vec<AbiParam>>();
 
-                    let res = builder.inst_results(call);
-                    if res.is_empty() {
-                        Ok(builder.ins().iconst(types::I8, 0))
-                    } else {
-                        Ok(res[0])
+                            builder.func.dfg.signatures[sig_ref].params = abi_params;
+
+                            let res = builder.inst_results(call);
+                            if res.is_empty() {
+                                Ok(builder.ins().iconst(types::I8, 0))
+                            } else {
+                                Ok(res[0])
+                            }
+                        } else {
+                            let mut arg_vals = vec![];
+                            let param_types = func_ctx.params.clone();
+                            for (arg, (_, ty)) in args.iter().zip(param_types) {
+                                let v = self.compile_expr(builder, Some(ty), arg)?;
+                                arg_vals.push(v);
+                            }
+                            let call = builder.ins().call(func, &arg_vals);
+                            let res = builder.inst_results(call);
+                            if res.is_empty() {
+                                Ok(builder.ins().iconst(types::I8, 0))
+                            } else {
+                                Ok(res[0])
+                            }
+                        }
                     }
-                } else {
-                    let mut arg_vals = vec![];
-                    let param_types = func_ctx.params.clone();
-                    for (arg, (_, ty)) in args.iter().zip(param_types) {
-                        let v = self.compile_expr(builder, Some(ty), arg)?;
-                        arg_vals.push(v);
-                    }
-                    let call = builder.ins().call(func, &arg_vals);
-                    let res = builder.inst_results(call);
-                    if res.is_empty() {
-                        Ok(builder.ins().iconst(types::I8, 0))
-                    } else {
-                        Ok(res[0])
+                    None => {
+                        let func_var = &ctx.vars[task_name];
+                        let TblType::TaskPtr { params, returns } = &func_var.type_ else {
+                            unreachable!()
+                        };
+                        let callee = builder.ins().stack_load(
+                            self.obj_module.isa().pointer_type(),
+                            func_var.slot,
+                            Offset32::new(0),
+                        );
+                        let mut arg_vals = vec![];
+                        let mut sig = self.obj_module.make_signature();
+                        if let Some(returns) = returns.clone() {
+                            sig.returns
+                                .push(AbiParam::new(self.to_cranelift_type(&returns).unwrap()));
+                        }
+                        for (arg, ty) in args.iter().zip(params.clone()) {
+                            let v = self.compile_expr(builder, Some(ty.clone()), arg)?;
+                            arg_vals.push(v);
+                            sig.params
+                                .push(AbiParam::new(self.to_cranelift_type(&ty).unwrap()));
+                        }
+
+                        let sig_ref = builder.import_signature(sig);
+                        let call = builder.ins().call_indirect(sig_ref, callee, &arg_vals);
+                        let res = builder.inst_results(call);
+                        if res.is_empty() {
+                            Ok(builder.ins().iconst(types::I8, 0))
+                        } else {
+                            Ok(res[0])
+                        }
                     }
                 }
             }
@@ -657,6 +703,7 @@ impl CodeGen {
             TblType::Array { .. } => Some(self.obj_module.target_config().pointer_type()),
             TblType::Pointer(_) => Some(self.obj_module.target_config().pointer_type()),
             TblType::Named(_) => None,
+            TblType::TaskPtr { .. } => Some(self.obj_module.target_config().pointer_type()),
         }
     }
 

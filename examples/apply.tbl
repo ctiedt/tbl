@@ -1,0 +1,22 @@
+extern task printf(...);
+
+task inc(v: u32) -> u32 {
+    return v + 1;
+}
+
+task double(v: u32) -> u32 {
+    return v * 2;
+}
+
+task apply(fun: task(u32) -> u32, v: u32) -> u32 {
+    return fun(v);
+}
+
+task main() -> u32 {
+    var v: u32 = 2;
+    printf("%p %p\n", inc, double);
+    var v1: u32 = apply(inc, v);
+    var v2: u32 = apply(double, v);
+    printf("%d %d\n", v1, v2);
+    return 0;
+}

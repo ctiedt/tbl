@@ -14,12 +14,14 @@ param_list = _{ (#param = ident ~ ":" ~ #type = type ~ ",")* ~ (#param = ident ~
 
 ident = @{ (ASCII_ALPHA | "_")+ ~ (ASCII_ALPHANUMERIC | "_")* }
 
-type = { #bool = bool | #int = integer | #array = array | #ptr = pointer_to | #named = ident }
+type = { #task_ptr = task_ptr | #bool = bool | #int = integer | #array = array | #ptr = pointer_to | #named = ident }
 bool = { "bool" }
 pointer_to = { "&" ~ type }
 array = { "[" ~ #item = type ~ ";" ~ (#len = int_literal) ~ "]" }
 int_literal = { ASCII_DIGIT+ }
 integer = @{ ("u" | "i") ~ ("8" | "16" | "32" | "64") }
+task_ptr = {"task" ~ "(" ~ task_ptr_args? ~ ")" ~ ("->" ~ #returns = type)? }
+task_ptr_args = _{ (#type = type ~ ",")* ~ (#type = type) }
 
 statement = { #cond = conditional | (#var_decl = var_decl | #assign = assign | (#return = return) | #sched = ("schedule" ~ expression) | #exit = exit | (#expr = expression)) ~ ";" }
 exit = { "exit" }
