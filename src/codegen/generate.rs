@@ -2,7 +2,7 @@ use std::{fs::File, sync::Arc};
 
 use cranelift::{
     codegen::{
-        ir::{immediates::Offset32, Function, UserFuncName},
+        ir::{immediates::Offset32, Function, StackSlot, UserFuncName},
         isa::TargetIsa,
         Context,
     },
@@ -14,7 +14,8 @@ use miette::{miette, IntoDiagnostic};
 use tracing::info;
 
 use crate::ast::{
-    Declaration, Expression, ExternTaskParams, Location, Program, Statement, Type as TblType,
+    Declaration, Expression, ExternTaskParams, Literal, Location, Program, Statement,
+    Type as TblType,
 };
 
 use super::{
@@ -280,33 +281,11 @@ impl CodeGen {
                     .func_by_idx_mut(fn_idx as usize)
                     .ok_or(miette!("Could not find function with ID {fn_idx}"))?;
                 fn_ctx.declare_var(name, type_.clone(), slot);
-                match type_ {
-                    TblType::Named(name) => {
-                        let Expression::Literal(crate::ast::Literal::Struct(members)) = value
-                        else {
-                            unreachable!()
-                        };
-                        let struct_ty = self.ctx.types[name].clone();
-                        let mut current_offset = 0;
-                        for (idx, (_, value)) in members.iter().enumerate() {
-                            let member_ty: TblType = struct_ty.member_ty(idx).clone();
-                            let val =
-                                self.compile_expr(func_builder, Some(member_ty.clone()), value)?;
-                            func_builder.ins().stack_store(
-                                val,
-                                slot,
-                                Offset32::new(current_offset),
-                            );
-                            current_offset += self.type_size(&member_ty) as i32;
-                        }
-                    }
-                    _ => {
-                        let value = self.compile_expr(func_builder, Some(type_.clone()), value)?;
-                        func_builder
-                            .ins()
-                            .stack_store(value, slot, Offset32::new(0));
-                    }
-                }
+                info!(
+                    "Declared variable {name} with type {type_:?} ({} bytes)",
+                    self.type_size(type_)
+                );
+                self.store_expr(func_builder, type_, slot, 0, value)?;
             }
             crate::ast::Statement::Assign { location, value } => {
                 let ty = self.type_of(ctx, location);
@@ -315,6 +294,58 @@ impl CodeGen {
                 func_builder
                     .ins()
                     .store(MemFlags::new(), val, loc, Offset32::new(0));
+            }
+        }
+        Ok(())
+    }
+
+    fn store_expr(
+        &mut self,
+        func_builder: &mut FunctionBuilder,
+        type_: &TblType,
+        slot: StackSlot,
+        offset: i32,
+        value: &Expression,
+    ) -> miette::Result<()> {
+        match type_ {
+            TblType::Named(name) => {
+                let Expression::Literal(crate::ast::Literal::Struct(members)) = value else {
+                    unreachable!()
+                };
+                let struct_ty = self.ctx.types[name].clone();
+                let mut current_offset = 0;
+                for (idx, (_, value)) in members.iter().enumerate() {
+                    let member_ty: TblType = struct_ty.member_ty(idx).clone();
+                    self.store_expr(
+                        func_builder,
+                        &member_ty,
+                        slot,
+                        offset + current_offset,
+                        value,
+                    )?;
+                    current_offset += self.type_size(&member_ty) as i32;
+                }
+            }
+            TblType::Array { item, .. } => {
+                let Expression::Literal(crate::ast::Literal::Array(values)) = value else {
+                    unreachable!()
+                };
+                let item_size = self.type_size(item);
+                for (idx, value) in values.iter().enumerate() {
+                    self.store_expr(
+                        func_builder,
+                        item,
+                        slot,
+                        offset + (item_size as i32 * idx as i32),
+                        value,
+                    )?;
+                }
+            }
+            _ => {
+                let value = self.compile_expr(func_builder, Some(type_.clone()), value)?;
+                func_builder
+                    .ins()
+                    .stack_store(value, slot, Offset32::new(offset));
             }
         }
         Ok(())
@@ -365,6 +396,9 @@ impl CodeGen {
                 },
                 crate::ast::Literal::Struct(_members) => {
                     // Struct literals are weird. They are handled in the assignment of struct variables.
+                    unimplemented!()
+                }
+                crate::ast::Literal::Array(_) => {
                     unimplemented!()
                 }
             },
@@ -604,6 +638,30 @@ impl CodeGen {
                     _ => unimplemented!(),
                 }
             }
+            Expression::Index { value, at } => {
+                let ty = self.type_of(ctx, value).unwrap();
+                let TblType::Array { item, .. } = ty else {
+                    unreachable!()
+                };
+                let val = self.compile_lvalue(builder, value)?;
+                let idx = self.compile_expr(
+                    builder,
+                    Some(TblType::Integer {
+                        signed: false,
+                        width: self.obj_module.isa().pointer_bits(),
+                    }),
+                    at,
+                )?;
+                let ty_size = self.type_size(&item) as i64;
+                let idx = builder.ins().imul_imm(idx, ty_size);
+                let addr = builder.ins().iadd(val, idx);
+                Ok(builder.ins().load(
+                    self.to_cranelift_type(&item).unwrap(),
+                    MemFlags::new(),
+                    addr,
+                    Offset32::new(0),
+                ))
+            }
         }
     }
 
@@ -648,6 +706,37 @@ impl CodeGen {
                     Offset32::new(offset as i32),
                 ))
             }
+            Expression::Index { value, at } => {
+                let Expression::Var(ref val) = **value else {
+                    unreachable!()
+                };
+                let var = &ctx.vars[val];
+
+                match &**at {
+                    Expression::Literal(Literal::Int(i)) => Ok(builder.ins().stack_addr(
+                        self.obj_module.isa().pointer_type(),
+                        var.slot,
+                        Offset32::new(*i as i32),
+                    )),
+                    _ => {
+                        let base_addr = builder.ins().stack_addr(
+                            self.obj_module.isa().pointer_type(),
+                            var.slot,
+                            Offset32::new(0),
+                        );
+                        let offset = self.compile_expr(
+                            builder,
+                            Some(TblType::Integer {
+                                signed: false,
+                                width: self.obj_module.isa().pointer_bits(),
+                            }),
+                            at,
+                        )?;
+
+                        Ok(builder.ins().iadd(base_addr, offset))
+                    }
+                }
+            }
             e => Err(miette!("Illegal expression for lvalue: {e:?}")),
         }
     }
@@ -664,6 +753,13 @@ impl CodeGen {
                 }
                 crate::ast::Literal::Bool(_) => Some(TblType::Bool),
                 crate::ast::Literal::Struct(_) => None,
+                crate::ast::Literal::Array(inner) => match inner.first() {
+                    Some(first) => self.type_of(ctx, first).map(|ty| TblType::Array {
+                        item: Box::new(ty),
+                        length: inner.len() as u64,
+                    }),
+                    None => None,
+                },
             },
             Expression::Var(v) => ctx.vars.get(v).map(|var| var.type_.clone()),
             Expression::Call { task, .. } => match &**task {
@@ -689,6 +785,13 @@ impl CodeGen {
                 Some(struct_ty.member_ty(member_idx).clone())
             }
             Expression::Cast { to, .. } => Some(to.clone()),
+            Expression::Index { value, .. } => {
+                let val_ty = self.type_of(ctx, value);
+                match val_ty {
+                    Some(TblType::Array { item, .. }) => Some(*item),
+                    _ => None,
+                }
+            }
         }
     }
 
@@ -708,15 +811,13 @@ impl CodeGen {
     }
 
     fn type_size(&self, type_: &TblType) -> u32 {
-        match self.to_cranelift_type(type_) {
-            Some(t) => t.bytes(),
-            None => match type_ {
-                TblType::Named(name) => {
-                    let ty = &self.ctx.types[name];
-                    ty.members.iter().map(|(_, t)| self.type_size(t)).sum()
-                }
-                _ => unreachable!(),
-            },
+        match type_ {
+            TblType::Array { item, length } => self.type_size(item) * (*length as u32),
+            TblType::Named(name) => {
+                let ty = &self.ctx.types[name];
+                ty.members.iter().map(|(_, t)| self.type_size(t)).sum()
+            }
+            t => self.to_cranelift_type(t).unwrap().bytes(),
         }
     }
 }

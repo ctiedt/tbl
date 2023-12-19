@@ -170,6 +170,10 @@ pub enum Expression {
         value: Box<Expression>,
         to: Type,
     },
+    Index {
+        value: Box<Expression>,
+        at: Box<Expression>,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -238,6 +242,7 @@ pub enum Literal {
     String(String),
     Bool(bool),
     Struct(Vec<(String, Expression)>),
+    Array(Vec<Expression>),
 }
 
 pub fn parse_type(tokens: Pair<'_, Rule>) -> miette::Result<Type> {
@@ -298,7 +303,7 @@ pub fn parse_type(tokens: Pair<'_, Rule>) -> miette::Result<Type> {
                 .transpose();
             Ok(Type::TaskPtr {
                 params: types?,
-                returns: returns?.map(|r| Box::new(r)),
+                returns: returns?.map(Box::new),
             })
         }
         _ => unreachable!(),
@@ -558,6 +563,14 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
                                     args: args?,
                                 })
                             }
+                            Some("index") => {
+                                let at =
+                                    Box::new(parse_expr(op.into_inner().next().ok_or(
+                                        miette!("Index operation should contain one pair"),
+                                    )?)?);
+
+                                Ok(Expression::Index { value, at })
+                            }
                             _ => unreachable!(),
                         }
                     }
@@ -604,6 +617,17 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
                             let members = member_names.into_iter().zip(member_values?).collect();
 
                             Ok(Expression::Literal(Literal::Struct(members)))
+                        } else if val.starts_with('[') && val.ends_with(']') {
+                            let array_val = inner
+                                .into_inner()
+                                .next()
+                                .ok_or(miette!("Array should contain an inner pair"))?
+                                .into_inner();
+
+                            let values: miette::Result<Vec<Expression>> =
+                                array_val.map(parse_expr).collect();
+
+                            Ok(Expression::Literal(Literal::Array(values?)))
                         } else {
                             Err(miette!("unknown literal `{val}`"))
                         }

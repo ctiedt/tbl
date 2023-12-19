@@ -1,0 +1,12 @@
+extern task printf(...);
+
+struct Foo {
+    bar: [u32; 4]
+}
+
+task main() -> u32 {
+    var foo: Foo = { bar: [0, 1, 2, 3] };
+    printf("%d\n", (foo.bar)[0]);
+    printf("%d\n", (foo.bar)[1]);
+    return 0;
+}
