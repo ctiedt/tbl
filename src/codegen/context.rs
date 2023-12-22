@@ -129,6 +129,7 @@ pub struct VarInfo {
     pub type_: TblType,
 }
 
+#[derive(Debug, Clone)]
 pub struct GlobalContext {
     pub id: cranelift_module::DataId,
     pub type_: TblType,

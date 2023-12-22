@@ -2,7 +2,7 @@ use std::{fs::File, sync::Arc};
 
 use cranelift::{
     codegen::{
-        ir::{immediates::Offset32, Function, StackSlot, UserFuncName},
+        ir::{immediates::Offset32, Function, UserFuncName},
         isa::TargetIsa,
         Context,
     },
@@ -222,6 +222,8 @@ impl CodeGen {
             }
         }
 
+        self.build_start()?;
+
         let mut res = self.obj_module.finish();
 
         if self.config.is_debug {
@@ -232,6 +234,73 @@ impl CodeGen {
         let mut file = File::create(obj_name).into_diagnostic()?;
         res.object.write_stream(&mut file).unwrap();
 
+        Ok(())
+    }
+
+    fn build_start(&mut self) -> miette::Result<()> {
+        let sig = Signature::new(self.obj_module.isa().default_call_conv());
+        let func_id = self
+            .obj_module
+            .declare_function("_tbl_start", cranelift_module::Linkage::Export, &sig)
+            .into_diagnostic()?;
+        let mut func = Function::new();
+        func.signature = sig;
+
+        let mut func_ctx = FunctionBuilderContext::new();
+        let mut func_builder = FunctionBuilder::new(&mut func, &mut func_ctx);
+
+        let fn_entry = func_builder.create_block();
+        func_builder.append_block_params_for_function_params(fn_entry);
+        func_builder.switch_to_block(fn_entry);
+        func_builder.seal_block(fn_entry);
+
+        let globals = self.ctx.globals.clone();
+        for global in globals.values() {
+            let data = self
+                .obj_module
+                .declare_data_in_func(global.id, func_builder.func);
+            let addr = func_builder
+                .ins()
+                .global_value(self.obj_module.isa().pointer_type(), data);
+            self.store_expr(
+                &mut func_builder,
+                &global.type_,
+                addr,
+                0,
+                &global.initializer,
+            )?;
+        }
+
+        match self.config.link_target {
+            crate::TargetPlatform::Windows => {
+                let main_ctx = &self.ctx.functions["main"];
+                let main_fn = self
+                    .obj_module
+                    .declare_func_in_func(main_ctx.func_id, func_builder.func);
+                func_builder.ins().call(main_fn, &[]);
+                func_builder.ins().return_(&[]);
+            }
+            crate::TargetPlatform::Linux => {
+                let sig = self.obj_module.make_signature();
+                let start_id = self
+                    .obj_module
+                    .declare_function("_start", cranelift_module::Linkage::Import, &sig)
+                    .into_diagnostic()?;
+
+                let start = self
+                    .obj_module
+                    .declare_func_in_func(start_id, func_builder.func);
+                func_builder.ins().call(start, &[]);
+                func_builder.ins().return_(&[]);
+            }
+        }
+
+        info!("{}", func.display());
+
+        let mut ctx = Context::for_function(func);
+        self.obj_module
+            .define_function(func_id, &mut ctx)
+            .into_diagnostic()?;
         Ok(())
     }
 

@@ -9,7 +9,7 @@ task foo() {
 
 task main() -> u32 {
     printf("%d\n", x);
-    x = 42;
+    x = 43;
     printf("%d\n", x);
     foo();
     printf("%d\n", x);
