@@ -1,0 +1,17 @@
+extern task printf(...);
+
+global x: u32 = 42;
+
+task foo() {
+    x = x + 1;
+    return;
+}
+
+task main() -> u32 {
+    printf("%d\n", x);
+    x = 42;
+    printf("%d\n", x);
+    foo();
+    printf("%d\n", x);
+    return 0;
+}

@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use ast::Program;
 use clap::Parser as ArgParser;
 use codegen::{CodeGen, Config};
 use cranelift::prelude::{
@@ -8,15 +7,15 @@ use cranelift::prelude::{
     settings::{self, Flags},
     Configurable,
 };
-use miette::{miette, IntoDiagnostic};
-use pest::{iterators::Pair, Parser};
+use miette::IntoDiagnostic;
+use pest::Parser;
 use pest_derive::Parser;
 use tracing_subscriber::FmtSubscriber;
 
-use crate::ast::parse_decl;
+use parse::parse_program;
 
-mod ast;
 mod codegen;
+mod parse;
 mod runtime;
 
 #[derive(Parser)]
@@ -31,24 +30,6 @@ struct Args {
     is_debug: bool,
     /// File to compile
     file: PathBuf,
-}
-
-fn parse_program(tokens: Pair<'_, Rule>) -> miette::Result<Program> {
-    let mut declarations = vec![];
-    for pair in tokens.into_inner() {
-        if matches!(pair.as_rule(), Rule::decl) {
-            let decl = parse_decl(pair)?;
-            declarations.push(decl);
-        } else if matches!(pair.as_rule(), Rule::EOI) {
-            break;
-        } else {
-            return Err(miette!(
-                "Unexpected element of type `{:?}` at top level",
-                pair.as_rule()
-            ));
-        }
-    }
-    Ok(Program { declarations })
 }
 
 fn link(file: &str) -> miette::Result<()> {
@@ -79,6 +60,7 @@ fn link(file: &str) -> miette::Result<()> {
                 "-entry:main",
                 &obj_name,
                 "ucrt.lib",
+                "vcruntime.lib",
                 "legacy_stdio_definitions.lib",
             ])
             .spawn()

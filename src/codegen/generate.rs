@@ -8,18 +8,21 @@ use cranelift::{
     },
     prelude::*,
 };
-use cranelift_module::{DataDescription, FuncId, Module};
+use cranelift_module::{DataDescription, FuncId, Init, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use miette::{miette, IntoDiagnostic};
 use tracing::info;
 
-use crate::ast::{
-    Declaration, Expression, ExternTaskParams, Literal, Location, Program, Statement,
-    Type as TblType,
+use crate::parse::{
+    types::{
+        BinaryOperator, Declaration, Expression, ExternTaskParams, Literal, Program, Statement,
+        Type as TblType, UnaryOperator,
+    },
+    Location,
 };
 
 use super::{
-    context::{CodeGenContext, FunctionContext, StructContext},
+    context::{CodeGenContext, FunctionContext, GlobalContext, StructContext, Symbol},
     debug_info::DebugInfoGenerator,
     Config,
 };
@@ -195,6 +198,27 @@ impl CodeGen {
                         members: members.clone(),
                     },
                 ),
+                Declaration::Global { name, type_, value } => {
+                    let data_id = self
+                        .obj_module
+                        .declare_data(name, cranelift_module::Linkage::Export, true, false)
+                        .into_diagnostic()?;
+                    let mut data_desc = DataDescription::new();
+                    data_desc.init = Init::Zeros {
+                        size: self.type_size(type_) as usize,
+                    };
+                    self.obj_module
+                        .define_data(data_id, &data_desc)
+                        .into_diagnostic()?;
+                    self.ctx.globals.insert(
+                        name.into(),
+                        GlobalContext {
+                            id: data_id,
+                            type_: type_.clone(),
+                            initializer: value.clone(),
+                        },
+                    );
+                }
             }
         }
 
@@ -219,7 +243,7 @@ impl CodeGen {
         let fn_idx = func_builder.func.name.get_user().unwrap().index;
         let ctx = &self.ctx.func_by_idx(fn_idx as usize);
         match stmt {
-            crate::ast::Statement::Conditional { test, then, else_ } => {
+            Statement::Conditional { test, then, else_ } => {
                 let then_block = func_builder.create_block();
                 let else_block = func_builder.create_block();
                 let after_block = func_builder.create_block();
@@ -253,13 +277,13 @@ impl CodeGen {
                 func_builder.seal_block(after_block);
                 func_builder.switch_to_block(after_block);
             }
-            crate::ast::Statement::Exit => {
+            Statement::Exit => {
                 func_builder.ins().return_(&[]);
             }
-            crate::ast::Statement::Expression(expr) => {
+            Statement::Expression(expr) => {
                 self.compile_expr(func_builder, None, expr)?;
             }
-            crate::ast::Statement::Return(v) => {
+            Statement::Return(v) => {
                 let mut return_values = vec![];
                 if let Some(expr) = v {
                     return_values.push(self.compile_expr(
@@ -270,10 +294,10 @@ impl CodeGen {
                 }
                 func_builder.ins().return_(&return_values);
             }
-            crate::ast::Statement::Schedule { task, args } => {
+            Statement::Schedule { task, args } => {
                 func_builder.ins().return_(&[]);
             }
-            crate::ast::Statement::VarDecl { name, type_, value } => {
+            Statement::VarDecl { name, type_, value } => {
                 let data = StackSlotData::new(StackSlotKind::ExplicitSlot, self.type_size(type_));
                 let slot = func_builder.create_sized_stack_slot(data);
                 let fn_ctx = self
@@ -285,15 +309,17 @@ impl CodeGen {
                     "Declared variable {name} with type {type_:?} ({} bytes)",
                     self.type_size(type_)
                 );
-                self.store_expr(func_builder, type_, slot, 0, value)?;
+                let addr = func_builder.ins().stack_addr(
+                    self.obj_module.isa().pointer_type(),
+                    slot,
+                    Offset32::new(0),
+                );
+                self.store_expr(func_builder, type_, addr, 0, value)?;
             }
-            crate::ast::Statement::Assign { location, value } => {
-                let ty = self.type_of(ctx, location);
+            Statement::Assign { location, value } => {
+                let type_ = self.type_of(ctx, location).unwrap();
                 let loc = self.compile_lvalue(func_builder, location)?;
-                let val = self.compile_expr(func_builder, ty, value)?;
-                func_builder
-                    .ins()
-                    .store(MemFlags::new(), val, loc, Offset32::new(0));
+                self.store_expr(func_builder, &type_, loc, 0, value)?;
             }
         }
         Ok(())
@@ -303,49 +329,61 @@ impl CodeGen {
         &mut self,
         func_builder: &mut FunctionBuilder,
         type_: &TblType,
-        slot: StackSlot,
+        addr: Value,
         offset: i32,
         value: &Expression,
     ) -> miette::Result<()> {
         match type_ {
-            TblType::Named(name) => {
-                let Expression::Literal(crate::ast::Literal::Struct(members)) = value else {
-                    unreachable!()
-                };
-                let struct_ty = self.ctx.types[name].clone();
-                let mut current_offset = 0;
-                for (idx, (_, value)) in members.iter().enumerate() {
-                    let member_ty: TblType = struct_ty.member_ty(idx).clone();
-                    self.store_expr(
-                        func_builder,
-                        &member_ty,
-                        slot,
-                        offset + current_offset,
-                        value,
-                    )?;
-                    current_offset += self.type_size(&member_ty) as i32;
+            TblType::Named(name) => match value {
+                Expression::Literal(Literal::Struct(members)) => {
+                    let struct_ty = self.ctx.types[name].clone();
+                    let mut current_offset = 0;
+                    for (idx, (_, value)) in members.iter().enumerate() {
+                        let member_ty: TblType = struct_ty.member_ty(idx).clone();
+                        self.store_expr(
+                            func_builder,
+                            &member_ty,
+                            addr,
+                            offset + current_offset,
+                            value,
+                        )?;
+                        current_offset += self.type_size(&member_ty) as i32;
+                    }
                 }
-            }
-            TblType::Array { item, .. } => {
-                let Expression::Literal(crate::ast::Literal::Array(values)) = value else {
-                    unreachable!()
-                };
-                let item_size = self.type_size(item);
-                for (idx, value) in values.iter().enumerate() {
-                    self.store_expr(
-                        func_builder,
-                        item,
-                        slot,
-                        offset + (item_size as i32 * idx as i32),
-                        value,
-                    )?;
+                expr => {
+                    let src = self.compile_lvalue(func_builder, expr)?;
+                    let addr = func_builder.ins().iadd_imm(addr, offset as i64);
+                    let size = func_builder
+                        .ins()
+                        .iconst(types::I64, self.type_size(type_) as i64);
+                    func_builder.call_memcpy(self.obj_module.target_config(), addr, src, size);
                 }
-            }
+            },
+            TblType::Array { item, length } => match value {
+                Expression::Literal(Literal::Array(values)) => {
+                    let item_size = self.type_size(item);
+                    for (idx, value) in values.iter().enumerate() {
+                        self.store_expr(
+                            func_builder,
+                            item,
+                            addr,
+                            offset + (item_size as i32 * idx as i32),
+                            value,
+                        )?;
+                    }
+                }
+                expr => {
+                    let src = self.compile_lvalue(func_builder, expr)?;
+                    let addr = func_builder.ins().iadd_imm(addr, offset as i64);
+                    let size = func_builder.ins().iconst(types::I64, *length as i64);
+                    func_builder.call_memcpy(self.obj_module.target_config(), addr, src, size);
+                }
+            },
             _ => {
                 let value = self.compile_expr(func_builder, Some(type_.clone()), value)?;
                 func_builder
                     .ins()
-                    .stack_store(value, slot, Offset32::new(offset));
+                    .store(MemFlags::new(), value, addr, Offset32::new(offset));
             }
         }
         Ok(())
@@ -361,7 +399,7 @@ impl CodeGen {
         let ctx = &self.ctx.func_by_idx(fn_idx as usize);
         match expr {
             Expression::Literal(literal) => match literal {
-                crate::ast::Literal::Int(i) => {
+                Literal::Int(i) => {
                     if let Some(type_hint) = type_hint {
                         let ty = self.to_cranelift_type(&type_hint).unwrap();
                         Ok(builder.ins().iconst(ty, *i))
@@ -369,7 +407,7 @@ impl CodeGen {
                         Err(miette!("No type hint for int literal `{i}`"))
                     }
                 }
-                crate::ast::Literal::String(s) => {
+                Literal::String(s) => {
                     let data_id = self
                         .obj_module
                         .declare_anonymous_data(true, false)
@@ -390,39 +428,55 @@ impl CodeGen {
                         .ins()
                         .global_value(self.obj_module.target_config().pointer_type(), data))
                 }
-                crate::ast::Literal::Bool(v) => match v {
+                Literal::Bool(v) => match v {
                     true => Ok(builder.ins().iconst(types::I8, 1)),
                     false => Ok(builder.ins().iconst(types::I8, 0)),
                 },
-                crate::ast::Literal::Struct(_members) => {
+                Literal::Struct(_members) => {
                     // Struct literals are weird. They are handled in the assignment of struct variables.
                     unimplemented!()
                 }
-                crate::ast::Literal::Array(_) => {
+                Literal::Array(_) => {
                     unimplemented!()
                 }
             },
-            Expression::Var(v) => match ctx.vars.get(v) {
-                Some(var) => Ok(builder.ins().stack_load(
-                    self.to_cranelift_type(&var.type_).unwrap(),
-                    var.slot,
-                    Offset32::new(0),
-                )),
-                None => {
-                    let var = self
-                        .ctx
-                        .functions
-                        .get(v)
-                        .ok_or(miette!("No variable or function with name `{v}` exists"))?;
+            Expression::Var(v) => {
+                match self
+                    .ctx
+                    .resolve_name(ctx, v)
+                    .ok_or(miette!("Cannot resolve name `{v}`"))?
+                {
+                    Symbol::Variable(var) => Ok(builder.ins().stack_load(
+                        self.to_cranelift_type(&var.type_).unwrap(),
+                        var.slot,
+                        Offset32::new(0),
+                    )),
+                    Symbol::Function(fun) => {
+                        let func_id = self
+                            .obj_module
+                            .declare_func_in_func(fun.func_id, builder.func);
+                        Ok(builder
+                            .ins()
+                            .func_addr(self.obj_module.isa().pointer_type(), func_id))
+                    }
+                    Symbol::Global(global) => {
+                        let data = self
+                            .obj_module
+                            .declare_data_in_func(global.id, builder.func);
 
-                    let func_id = self
-                        .obj_module
-                        .declare_func_in_func(var.func_id, builder.func);
-                    Ok(builder
-                        .ins()
-                        .func_addr(self.obj_module.isa().pointer_type(), func_id))
+                        let addr = builder
+                            .ins()
+                            .global_value(self.obj_module.isa().pointer_type(), data);
+
+                        Ok(builder.ins().load(
+                            self.to_cranelift_type(&global.type_).unwrap(),
+                            MemFlags::new(),
+                            addr,
+                            Offset32::new(0),
+                        ))
+                    }
                 }
-            },
+            }
             Expression::Call { task, args } => {
                 let task_name = match &**task {
                     Expression::Var(t) => t,
@@ -531,49 +585,45 @@ impl CodeGen {
                 let left = self.compile_expr(builder, th.clone(), left)?;
                 let right = self.compile_expr(builder, th, right)?;
                 match operator {
-                    crate::ast::BinaryOperator::Equal => {
-                        Ok(builder.ins().icmp(IntCC::Equal, left, right))
-                    }
-                    crate::ast::BinaryOperator::Unequal => {
-                        Ok(builder.ins().icmp(IntCC::NotEqual, left, right))
-                    }
-                    crate::ast::BinaryOperator::LessThan => {
+                    BinaryOperator::Equal => Ok(builder.ins().icmp(IntCC::Equal, left, right)),
+                    BinaryOperator::Unequal => Ok(builder.ins().icmp(IntCC::NotEqual, left, right)),
+                    BinaryOperator::LessThan => {
                         Ok(builder.ins().icmp(IntCC::SignedLessThan, left, right))
                     }
-                    crate::ast::BinaryOperator::LessOrEqual => {
+                    BinaryOperator::LessOrEqual => {
                         Ok(builder
                             .ins()
                             .icmp(IntCC::SignedLessThanOrEqual, left, right))
                     }
-                    crate::ast::BinaryOperator::GreaterThan => {
+                    BinaryOperator::GreaterThan => {
                         Ok(builder.ins().icmp(IntCC::SignedGreaterThan, left, right))
                     }
-                    crate::ast::BinaryOperator::GreaterOrEqual => {
+                    BinaryOperator::GreaterOrEqual => {
                         Ok(builder
                             .ins()
                             .icmp(IntCC::SignedGreaterThanOrEqual, left, right))
                     }
-                    crate::ast::BinaryOperator::And => Ok(builder.ins().band(left, right)),
-                    crate::ast::BinaryOperator::Or => Ok(builder.ins().bor(left, right)),
-                    crate::ast::BinaryOperator::Add => Ok(builder.ins().iadd(left, right)),
-                    crate::ast::BinaryOperator::Subtract => Ok(builder.ins().isub(left, right)),
-                    crate::ast::BinaryOperator::Multiply => Ok(builder.ins().imul(left, right)),
-                    crate::ast::BinaryOperator::Divide => Ok(builder.ins().sdiv(left, right)),
+                    BinaryOperator::And => Ok(builder.ins().band(left, right)),
+                    BinaryOperator::Or => Ok(builder.ins().bor(left, right)),
+                    BinaryOperator::Add => Ok(builder.ins().iadd(left, right)),
+                    BinaryOperator::Subtract => Ok(builder.ins().isub(left, right)),
+                    BinaryOperator::Multiply => Ok(builder.ins().imul(left, right)),
+                    BinaryOperator::Divide => Ok(builder.ins().sdiv(left, right)),
                 }
             }
             Expression::UnaryOperation { value, operator } => {
                 let ty = self.type_of(ctx, value).unwrap();
                 let val = self.compile_expr(builder, type_hint.clone(), value)?;
                 match operator {
-                    crate::ast::UnaryOperator::Dereference => Ok(builder.ins().load(
+                    UnaryOperator::Dereference => Ok(builder.ins().load(
                         self.to_cranelift_type(&ty).unwrap(),
                         MemFlags::new(),
                         val,
                         Offset32::new(0),
                     )),
-                    crate::ast::UnaryOperator::Not => Ok(builder.ins().bnot(val)),
-                    crate::ast::UnaryOperator::Minus => Ok(builder.ins().ineg(val)),
-                    crate::ast::UnaryOperator::Reference => {
+                    UnaryOperator::Not => Ok(builder.ins().bnot(val)),
+                    UnaryOperator::Minus => Ok(builder.ins().ineg(val)),
+                    UnaryOperator::Reference => {
                         let Expression::Var(v) = *value.clone() else {
                             return Err(miette!(
                                 "Cannot take reference to something other than a variable"
@@ -590,11 +640,7 @@ impl CodeGen {
                 }
             }
             Expression::StructAccess { value, member } => {
-                let Expression::Var(ref val) = **value else {
-                    unreachable!()
-                };
-                let var = &ctx.vars[val];
-                let ty_name = var.type_.name();
+                let ty_name = self.type_of(ctx, value).unwrap().name();
                 let ty = &self.ctx.types[&ty_name].members;
 
                 let mut offset = 0;
@@ -604,12 +650,40 @@ impl CodeGen {
                     idx += 1;
                 }
 
-                Ok(builder.ins().stack_load(
-                    self.to_cranelift_type(&ty[idx].1)
-                        .ok_or(miette!("Cannot convert TBL type to cranelift type"))?,
-                    var.slot,
-                    Offset32::new(offset as i32),
-                ))
+                let member_ty = self
+                    .to_cranelift_type(&ty[idx].1)
+                    .ok_or(miette!("Cannot convert TBL type to cranelift type"))?;
+
+                let Expression::Var(ref val) = **value else {
+                    unreachable!()
+                };
+
+                match self
+                    .ctx
+                    .resolve_name(ctx, val)
+                    .ok_or(miette!("Failed to resolve name `{val}`"))?
+                {
+                    Symbol::Variable(var) => Ok(builder.ins().stack_load(
+                        member_ty,
+                        var.slot,
+                        Offset32::new(offset as i32),
+                    )),
+                    Symbol::Function(_) => unimplemented!(),
+                    Symbol::Global(global) => {
+                        let data = self
+                            .obj_module
+                            .declare_data_in_func(global.id, builder.func);
+                        let addr = builder
+                            .ins()
+                            .global_value(self.obj_module.isa().pointer_type(), data);
+                        Ok(builder.ins().load(
+                            member_ty,
+                            MemFlags::new(),
+                            addr,
+                            Offset32::new(offset as i32),
+                        ))
+                    }
+                }
             }
             Expression::Cast { value, to } => {
                 let current_ty = self
@@ -674,23 +748,29 @@ impl CodeGen {
         let ctx = &self.ctx.func_by_idx(fn_idx as usize);
         match expr {
             Expression::Var(v) => {
-                let var = ctx
-                    .vars
-                    .get(v)
-                    .ok_or(miette!("Variable `{v}` does not exist"))?;
-
-                Ok(builder.ins().stack_addr(
-                    self.obj_module.isa().pointer_type(),
-                    var.slot,
-                    Offset32::new(0),
-                ))
+                match self
+                    .ctx
+                    .resolve_name(ctx, v)
+                    .ok_or(miette!("Failed to resolve name `{v}`"))?
+                {
+                    Symbol::Variable(var) => Ok(builder.ins().stack_addr(
+                        self.obj_module.isa().pointer_type(),
+                        var.slot,
+                        Offset32::new(0),
+                    )),
+                    Symbol::Function(_) => todo!(),
+                    Symbol::Global(global) => {
+                        let value = self
+                            .obj_module
+                            .declare_data_in_func(global.id, builder.func);
+                        Ok(builder
+                            .ins()
+                            .global_value(self.obj_module.isa().pointer_type(), value))
+                    }
+                }
             }
             Expression::StructAccess { value, member } => {
-                let Expression::Var(ref val) = **value else {
-                    unreachable!()
-                };
-                let var = &ctx.vars[val];
-                let ty_name = var.type_.name();
+                let ty_name = self.type_of(ctx, value).unwrap().name();
                 let ty = &self.ctx.types[&ty_name].members;
 
                 let mut offset = 0;
@@ -700,30 +780,34 @@ impl CodeGen {
                     idx += 1;
                 }
 
-                Ok(builder.ins().stack_addr(
-                    self.obj_module.isa().pointer_type(),
-                    var.slot,
-                    Offset32::new(offset as i32),
-                ))
-            }
-            Expression::Index { value, at } => {
                 let Expression::Var(ref val) = **value else {
                     unreachable!()
                 };
-                let var = &ctx.vars[val];
 
-                match &**at {
-                    Expression::Literal(Literal::Int(i)) => Ok(builder.ins().stack_addr(
+                match self.ctx.resolve_name(ctx, val).unwrap() {
+                    Symbol::Variable(var) => Ok(builder.ins().stack_addr(
                         self.obj_module.isa().pointer_type(),
                         var.slot,
-                        Offset32::new(*i as i32),
+                        Offset32::new(offset as i32),
                     )),
+                    Symbol::Function(_) => unimplemented!(),
+                    Symbol::Global(global) => {
+                        let data = self
+                            .obj_module
+                            .declare_data_in_func(global.id, builder.func);
+                        let base_addr = builder
+                            .ins()
+                            .global_value(self.obj_module.isa().pointer_type(), data);
+                        Ok(builder.ins().iadd_imm(base_addr, offset as i64))
+                    }
+                }
+            }
+            Expression::Index { value, at } => {
+                let addr = self.compile_lvalue(builder, value)?;
+
+                match &**at {
+                    Expression::Literal(Literal::Int(i)) => Ok(builder.ins().iadd_imm(addr, *i)),
                     _ => {
-                        let base_addr = builder.ins().stack_addr(
-                            self.obj_module.isa().pointer_type(),
-                            var.slot,
-                            Offset32::new(0),
-                        );
                         let offset = self.compile_expr(
                             builder,
                             Some(TblType::Integer {
@@ -733,7 +817,7 @@ impl CodeGen {
                             at,
                         )?;
 
-                        Ok(builder.ins().iadd(base_addr, offset))
+                        Ok(builder.ins().iadd(addr, offset))
                     }
                 }
             }
@@ -744,16 +828,14 @@ impl CodeGen {
     fn type_of(&self, ctx: &FunctionContext, value: &Expression) -> Option<TblType> {
         match value {
             Expression::Literal(l) => match l {
-                crate::ast::Literal::Int(_) => None,
-                crate::ast::Literal::String(_) => {
-                    Some(TblType::Pointer(Box::new(TblType::Integer {
-                        signed: false,
-                        width: 8,
-                    })))
-                }
-                crate::ast::Literal::Bool(_) => Some(TblType::Bool),
-                crate::ast::Literal::Struct(_) => None,
-                crate::ast::Literal::Array(inner) => match inner.first() {
+                Literal::Int(_) => None,
+                Literal::String(_) => Some(TblType::Pointer(Box::new(TblType::Integer {
+                    signed: false,
+                    width: 8,
+                }))),
+                Literal::Bool(_) => Some(TblType::Bool),
+                Literal::Struct(_) => None,
+                Literal::Array(inner) => match inner.first() {
                     Some(first) => self.type_of(ctx, first).map(|ty| TblType::Array {
                         item: Box::new(ty),
                         length: inner.len() as u64,
@@ -761,7 +843,14 @@ impl CodeGen {
                     None => None,
                 },
             },
-            Expression::Var(v) => ctx.vars.get(v).map(|var| var.type_.clone()),
+            Expression::Var(v) => self.ctx.resolve_name(ctx, v).map(|r| match r {
+                Symbol::Variable(var) => var.type_.clone(),
+                Symbol::Function(fun) => TblType::TaskPtr {
+                    params: fun.params.iter().map(|(_, ty)| ty.clone()).collect(),
+                    returns: fun.returns.clone().map(Box::new),
+                },
+                Symbol::Global(global) => global.type_.clone(),
+            }),
             Expression::Call { task, .. } => match &**task {
                 Expression::Var(t) => self.ctx.functions[t].returns.clone(),
                 _ => None,
@@ -797,6 +886,7 @@ impl CodeGen {
 
     fn to_cranelift_type(&self, type_: &TblType) -> Option<Type> {
         match type_ {
+            TblType::Any => None,
             TblType::Bool => Some(types::I8),
             TblType::Integer { width: 8, .. } => Some(types::I8),
             TblType::Integer { width: 16, .. } => Some(types::I16),

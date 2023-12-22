@@ -3,12 +3,16 @@ use std::collections::HashMap;
 use cranelift::codegen::ir::StackSlot;
 use cranelift_module::FuncId;
 
-use crate::ast::{Location, Type as TblType};
+use crate::parse::{
+    types::{Expression, Type as TblType},
+    Location,
+};
 
 #[derive(Default)]
 pub struct CodeGenContext {
     pub types: HashMap<String, StructContext>,
     pub functions: HashMap<String, FunctionContext>,
+    pub globals: HashMap<String, GlobalContext>,
     func_indices: Vec<String>,
 }
 
@@ -33,6 +37,7 @@ impl CodeGenContext {
 
     pub fn type_size(&self, ty: &TblType, ptr_size: u8) -> u8 {
         match ty {
+            TblType::Any => 0,
             TblType::Bool => 1,
             TblType::Integer { width, .. } => width / 8,
             TblType::Array { item, length } => self.type_size(item, ptr_size) * (*length as u8),
@@ -48,6 +53,22 @@ impl CodeGenContext {
             TblType::TaskPtr { .. } => ptr_size,
         }
     }
+
+    pub fn resolve_name<'a>(&'a self, ctx: &'a FunctionContext, name: &str) -> Option<Symbol<'a>> {
+        match ctx.vars.get(name) {
+            Some(var) => Some(Symbol::Variable(var)),
+            None => match self.globals.get(name) {
+                Some(global) => Some(Symbol::Global(global)),
+                None => self.functions.get(name).map(Symbol::Function),
+            },
+        }
+    }
+}
+
+pub enum Symbol<'a> {
+    Variable(&'a VarInfo),
+    Function(&'a FunctionContext),
+    Global(&'a GlobalContext),
 }
 
 #[derive(Clone, Debug)]
@@ -106,4 +127,10 @@ impl FunctionContext {
 pub struct VarInfo {
     pub slot: StackSlot,
     pub type_: TblType,
+}
+
+pub struct GlobalContext {
+    pub id: cranelift_module::DataId,
+    pub type_: TblType,
+    pub initializer: Expression,
 }

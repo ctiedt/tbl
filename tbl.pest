@@ -1,6 +1,6 @@
 program = { SOI ~ decl* ~ EOI }
 
-decl = { task | extern_task | struct }
+decl = { task | extern_task | struct | global }
 
 extern_task = { "extern" ~ "task" ~ (#name = ident) ~ "(" ~ (param_list | #variadic = variadic_params)? ~ ")" ~ ("->" ~ #returns = type)? ~ ";" }
 
@@ -10,18 +10,21 @@ task = { "task" ~ (#name = ident) ~ "(" ~ param_list? ~ ")" ~ ("->" ~ #returns =
 
 struct = { "struct" ~ (#name = ident) ~ "{" ~ param_list ~ "}" }
 
+global = { "global" ~ (#name = ident) ~ ":" ~ #type = type ~ "=" ~ #value = expression ~ ";" }
+
 param_list = _{ (#param = ident ~ ":" ~ #type = type ~ ",")* ~ (#param = ident ~ ":" ~ #type = type) }
 
 ident = @{ (ASCII_ALPHA | "_")+ ~ (ASCII_ALPHANUMERIC | "_")* }
 
-type = { #task_ptr = task_ptr | #bool = bool | #int = integer | #array = array | #ptr = pointer_to | #named = ident }
+type = { #any = any | #task_ptr = task_ptr | #bool = bool | #int = integer | #array = array | #ptr = pointer_to | #named = ident }
 bool = { "bool" }
 pointer_to = { "&" ~ type }
 array = { "[" ~ #item = type ~ ";" ~ (#len = int_literal) ~ "]" }
 int_literal = { ASCII_DIGIT+ }
 integer = @{ ("u" | "i") ~ ("8" | "16" | "32" | "64") }
-task_ptr = {"task" ~ "(" ~ task_ptr_args? ~ ")" ~ ("->" ~ #returns = type)? }
+task_ptr = {"task" ~ "(" ~ task_ptr_args? ~ ")" ~ ("->" ~ #ptr_returns = type)? }
 task_ptr_args = _{ (#type = type ~ ",")* ~ (#type = type) }
+any = { "any" }
 
 statement = { #cond = conditional | (#var_decl = var_decl | #assign = assign | (#return = return) | #sched = ("schedule" ~ expression) | #exit = exit | (#expr = expression)) ~ ";" }
 exit = { "exit" }
@@ -49,18 +52,19 @@ unary = { un_op ~ unary | postfix }
 un_op = { "!" | "-" | "*" | "&" }
 
 postfix = {  primary ~ postfix_op | primary }
-postfix_op = _{ #struct_access = struct_access | #cast = cast | #call = call }
+postfix_op = _{ #index = index | #struct_access = struct_access | #cast = cast | #call = call }
 struct_access = { "." ~ #member = ident }
 cast = { "as" ~ #to = type }
 call = { "(" ~ arg_list? ~ ")" }
+index = { "[" ~ expression ~ "]" }
 
 primary = { value | ident | "(" ~ expression ~ ")" }
 
 arg_list = _{ (#arg = expression ~ ",")* ~ #arg = expression }
 
-value = { #struct = struct_literal | string | #int = ASCII_DIGIT+ | #bool = ("true" | "false") | "'" ~ #char = (ASCII) ~ "'" }
+value = { #array = array_literal | #struct = struct_literal | string | #int = ASCII_DIGIT+ | #bool = ("true" | "false") | "'" ~ #char = (ASCII) ~ "'" }
 struct_literal = { "{" ~ (#member = ident ~ ":" ~ #value = expression ~ ",")* ~ (#member = ident ~ ":" ~ #value = expression) ~ "}" }
-
+array_literal = { "[" ~ (expression ~ ",")* ~ (expression)? ~ "]" }
 string = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
 
 WHITESPACE = _{ WHITE_SPACE | NEWLINE }

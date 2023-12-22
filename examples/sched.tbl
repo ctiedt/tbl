@@ -1,0 +1,37 @@
+extern task printf(...);
+
+struct Task {
+    task_: task(&any) -> &any,
+    args: &any
+}
+
+struct Scheduler {
+    tasks: [Task; 64],
+    num_tasks: u32,
+    current: i32
+}
+
+global SCHED: Scheduler = {tasks: [], num_tasks: 0, current: -1};
+
+task sched_enqueue(task_: task(&any) -> &any, args: &any) {
+    //var num_tasks: u32 = SCHED.num_tasks;
+    (SCHED.tasks)[(SCHED.num_tasks) as i64] = {task_: task_, args: args};
+    SCHED.num_tasks = SCHED.num_tasks + 1;
+    return;
+}
+
+task foo(_: u32) {
+    printf("Hello, foo\n");
+    return;
+}
+
+task main() -> i32 {
+    sched_enqueue(foo, 0);
+    var tasks: [Task; 64] = SCHED.tasks;
+    var t1: Task = tasks[0];
+    var t: task(&any) -> &any = t1.task_;
+    printf("%d\n", SCHED.num_tasks);
+    printf("%p\n", t);
+    t(0);
+    return 0;
+}

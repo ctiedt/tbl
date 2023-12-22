@@ -1,249 +1,11 @@
-use std::str::FromStr;
-
-use miette::{miette, Diagnostic, IntoDiagnostic};
+use miette::{miette, IntoDiagnostic};
 use pest::iterators::{Pair, Pairs};
-use thiserror::Error;
 
-use crate::Rule;
+use crate::{parse::types::BinaryOperator, Rule};
 
-#[derive(Error, Debug, Diagnostic)]
-pub enum ParseError {
-    #[error("unknown operator")]
-    UnknownOperator(String),
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Location {
-    pub line: u64,
-    pub column: u64,
-}
-
-impl From<pest::Span<'_>> for Location {
-    fn from(value: pest::Span) -> Self {
-        let (line, column) = value.start_pos().line_col();
-        Self {
-            line: line as u64,
-            column: column as u64,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Program {
-    pub declarations: Vec<Declaration>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Type {
-    Bool,
-    Integer {
-        signed: bool,
-        width: u8,
-    },
-    Array {
-        item: Box<Type>,
-        length: u64,
-    },
-    Pointer(Box<Type>),
-    Named(String),
-    TaskPtr {
-        params: Vec<Type>,
-        returns: Option<Box<Type>>,
-    },
-}
-
-impl Type {
-    pub fn name(&self) -> String {
-        match self {
-            Type::Bool => "bool".to_string(),
-            Type::Integer { signed, width } => {
-                format!("{}{width}", if *signed { "i" } else { "u" })
-            }
-            Type::Array { item, length } => format!("[{}; {length}]", item.name()),
-            Type::Pointer(t) => format!("&{}", t.name()),
-            Type::Named(n) => n.to_string(),
-            Type::TaskPtr { params, returns } => {
-                format!(
-                    "task({}){}",
-                    params
-                        .iter()
-                        .map(|p| p.name())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    if let Some(returns) = returns {
-                        format!(" -> {}", returns.name())
-                    } else {
-                        "".to_string()
-                    }
-                )
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExternTaskParams {
-    Variadic,
-    WellKnown(Vec<(String, Type)>),
-}
-
-impl ExternTaskParams {
-    pub fn is_variadic(&self) -> bool {
-        matches!(self, ExternTaskParams::Variadic)
-    }
-
-    pub fn to_arg_vec(&self) -> Vec<(String, Type)> {
-        match self {
-            ExternTaskParams::Variadic => vec![],
-            ExternTaskParams::WellKnown(params) => params.to_vec(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Declaration {
-    ExternTask {
-        name: String,
-        params: ExternTaskParams,
-        returns: Option<Type>,
-    },
-    Task {
-        location: Location,
-        name: String,
-        params: Vec<(String, Type)>,
-        returns: Option<Type>,
-        body: Vec<Statement>,
-    },
-    Struct {
-        name: String,
-        members: Vec<(String, Type)>,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Statement {
-    Conditional {
-        test: Expression,
-        then: Vec<Statement>,
-        else_: Vec<Statement>,
-    },
-    Exit,
-    Expression(Expression),
-    Return(Option<Expression>),
-    Schedule {
-        task: String,
-        args: Vec<Expression>,
-    },
-    VarDecl {
-        name: String,
-        type_: Type,
-        value: Expression,
-    },
-    Assign {
-        location: Expression,
-        value: Expression,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Expression {
-    Literal(Literal),
-    Var(String),
-    Call {
-        task: Box<Expression>,
-        args: Vec<Expression>,
-    },
-    BinaryOperation {
-        left: Box<Expression>,
-        right: Box<Expression>,
-        operator: BinaryOperator,
-    },
-    UnaryOperation {
-        value: Box<Expression>,
-        operator: UnaryOperator,
-    },
-    StructAccess {
-        value: Box<Expression>,
-        member: String,
-    },
-    Cast {
-        value: Box<Expression>,
-        to: Type,
-    },
-    Index {
-        value: Box<Expression>,
-        at: Box<Expression>,
-    },
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum BinaryOperator {
-    Equal,
-    Unequal,
-    LessThan,
-    LessOrEqual,
-    GreaterThan,
-    GreaterOrEqual,
-    And,
-    Or,
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-}
-
-impl FromStr for BinaryOperator {
-    type Err = ParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "==" => Ok(BinaryOperator::Equal),
-            "!=" => Ok(BinaryOperator::Unequal),
-            ">" => Ok(BinaryOperator::GreaterThan),
-            ">=" => Ok(BinaryOperator::GreaterOrEqual),
-            "<" => Ok(BinaryOperator::LessThan),
-            "<=" => Ok(BinaryOperator::LessOrEqual),
-            "&&" => Ok(BinaryOperator::And),
-            "||" => Ok(BinaryOperator::Or),
-            "+" => Ok(BinaryOperator::Add),
-            "-" => Ok(BinaryOperator::Subtract),
-            "*" => Ok(BinaryOperator::Multiply),
-            "/" => Ok(BinaryOperator::Divide),
-            other => Err(ParseError::UnknownOperator(other.into())),
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum UnaryOperator {
-    Dereference,
-    Not,
-    Minus,
-    Reference,
-}
-
-impl FromStr for UnaryOperator {
-    type Err = ParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "*" => Ok(UnaryOperator::Dereference),
-            "!" => Ok(UnaryOperator::Not),
-            "-" => Ok(UnaryOperator::Minus),
-            "&" => Ok(UnaryOperator::Reference),
-            other => Err(ParseError::UnknownOperator(other.into())),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Literal {
-    Int(i64),
-    String(String),
-    Bool(bool),
-    Struct(Vec<(String, Expression)>),
-    Array(Vec<Expression>),
-}
+use super::types::{
+    Declaration, Expression, ExternTaskParams, Literal, Statement, Type, UnaryOperator,
+};
 
 pub fn parse_type(tokens: Pair<'_, Rule>) -> miette::Result<Type> {
     let pair = tokens
@@ -298,7 +60,7 @@ pub fn parse_type(tokens: Pair<'_, Rule>) -> miette::Result<Type> {
             let types: miette::Result<Vec<Type>> =
                 inner.clone().find_tagged("type").map(parse_type).collect();
             let returns = inner
-                .find_first_tagged("returns")
+                .find_first_tagged("ptr_returns")
                 .map(parse_type)
                 .transpose();
             Ok(Type::TaskPtr {
@@ -306,6 +68,7 @@ pub fn parse_type(tokens: Pair<'_, Rule>) -> miette::Result<Type> {
                 returns: returns?.map(Box::new),
             })
         }
+        Rule::any => Ok(Type::Any),
         _ => unreachable!(),
     }
 }
@@ -402,6 +165,28 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
             let members = param_names.zip(param_types?).collect();
 
             Ok(Declaration::Struct { name, members })
+        }
+        Rule::global => {
+            let pairs = pair.into_inner();
+            let name = pairs
+                .find_first_tagged("name")
+                .ok_or(miette!("Global has no name"))?
+                .as_str()
+                .to_string();
+            let type_ = parse_type(
+                pairs
+                    .find_first_tagged("type")
+                    .ok_or(miette!("Global has no type"))?,
+            )?;
+            let value = parse_expr(
+                pairs
+                    .find_first_tagged("value")
+                    .ok_or(miette!("Global has no value"))?
+                    .into_inner()
+                    .next()
+                    .ok_or(miette!("Global value should contain one inner pair"))?,
+            )?;
+            Ok(Declaration::Global { name, type_, value })
         }
         r => unreachable!("{r:?}"),
     }
@@ -639,26 +424,6 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
             Rule::expression => {
                 let inner = tokens.into_inner().next().unwrap();
                 parse_expr(inner)
-            }
-            Rule::struct_access => {
-                let pairs = tokens.into_inner();
-                let var = Expression::Var(
-                    pairs
-                        .find_first_tagged("var")
-                        .ok_or(miette!("Struct access needs a variable"))?
-                        .as_str()
-                        .to_string(),
-                );
-                let member = pairs
-                    .find_first_tagged("member")
-                    .ok_or(miette!("Struct access needs a member"))?
-                    .as_str()
-                    .to_string();
-
-                Ok(Expression::StructAccess {
-                    value: Box::new(var),
-                    member,
-                })
             }
             r => unimplemented!("{r:?}"),
         },
