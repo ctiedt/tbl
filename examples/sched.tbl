@@ -1,4 +1,5 @@
 extern task printf(...);
+extern task Sleep(time: u32);
 
 struct Task {
     task_: task(&any) -> &any,
@@ -7,17 +8,33 @@ struct Task {
 
 struct Scheduler {
     tasks: [Task; 64],
-    num_tasks: u32,
-    current: i32
+    num_tasks: i64,
+    current: i64
 }
 
 global SCHED: Scheduler = {tasks: [], num_tasks: 0, current: -1};
 
 task sched_enqueue(task_: task(&any) -> &any, args: &any) {
-    //var num_tasks: u32 = SCHED.num_tasks;
-    (SCHED.tasks)[(SCHED.num_tasks) as i64] = {task_: task_, args: args};
+    (SCHED.tasks)[SCHED.num_tasks] = {task_: task_, args: args};
     SCHED.num_tasks = SCHED.num_tasks + 1;
-    return;
+    if (SCHED.current == -1) {
+        SCHED.current = 0;
+    }
+}
+
+task sched_run() {
+   var current: i64 = SCHED.current;
+   var t: Task = (SCHED.tasks)[current];
+   var t1: task(&any) -> &any = t.task_;
+   var args: &any = t.args;
+   t1(args);
+   SCHED.current = SCHED.current + 1;
+   if (SCHED.current == SCHED.num_tasks) {
+        SCHED.current = 0;
+   }
+   Sleep(100);
+   sched_run();
+   return;
 }
 
 task foo(_: u32) {
@@ -25,13 +42,14 @@ task foo(_: u32) {
     return;
 }
 
+task bar(_: u32) {
+    printf("Hello, bar\n");
+    return;
+}
+
 task main() -> i32 {
-    sched_enqueue(foo, 0);
-    var tasks: [Task; 64] = SCHED.tasks;
-    var t1: Task = tasks[0];
-    var t: task(&any) -> &any = t1.task_;
-    printf("%d\n", SCHED.num_tasks);
-    printf("%p\n", t);
-    t(0);
+    schedule foo(0);
+    schedule bar(0);
+    //sched_run();
     return 0;
 }

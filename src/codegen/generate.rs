@@ -125,7 +125,7 @@ impl CodeGen {
                             .push(AbiParam::new(self.to_cranelift_type(ret).unwrap()));
                     }
 
-                    info!("{name}({:?})", params);
+                    info!("{name}({:?}) -> {returns:?}", params);
 
                     let func_id = self
                         .obj_module
@@ -168,14 +168,14 @@ impl CodeGen {
                     for stmt in body {
                         self.compile_stmt(&mut func_builder, stmt)?;
                     }
-                    //if body.last().is_none()
-                    //    || !matches!(body.last().unwrap(), Statement::Return(_))
-                    //{
-                    //    self.compile_stmt(&mut func_builder, &Statement::Return(None))?;
-                    //}
+                    if body.last().is_none()
+                        || !matches!(body.last().unwrap(), Statement::Return(_))
+                    {
+                        self.compile_stmt(&mut func_builder, &Statement::Return(None))?;
+                    }
 
+                    info!("{}", func_builder.func.display());
                     func_builder.finalize();
-                    info!("{}", func.display());
 
                     let mut ctx = Context::for_function(func);
 
@@ -271,14 +271,63 @@ impl CodeGen {
             )?;
         }
 
+        let putchar_id = match self.ctx.functions.get("putchar") {
+            Some(fun) => fun.func_id,
+            None => {
+                let mut sig = self.obj_module.make_signature();
+                sig.params.push(AbiParam::new(types::I32));
+                sig.returns.push(AbiParam::new(types::I32));
+                self.obj_module
+                    .declare_function("putchar", cranelift_module::Linkage::Import, &sig)
+                    .into_diagnostic()?
+            }
+        };
+
+        let putchar = self
+            .obj_module
+            .declare_func_in_func(putchar_id, func_builder.func);
+
+        let mut sig = self.obj_module.make_signature();
+        sig.params
+            .push(AbiParam::new(self.obj_module.isa().pointer_type()));
+        sig.returns.push(AbiParam::new(types::I32));
+        let atexit_id = self
+            .obj_module
+            .declare_function("atexit", cranelift_module::Linkage::Import, &sig)
+            .into_diagnostic()?;
+
+        let atexit = self
+            .obj_module
+            .declare_func_in_func(atexit_id, func_builder.func);
+
+        let sig = self.obj_module.make_signature();
+        let sched_run_id = self
+            .obj_module
+            .declare_function("sched_run", cranelift_module::Linkage::Export, &sig)
+            .into_diagnostic()?;
+
+        let sched_run = self
+            .obj_module
+            .declare_func_in_func(sched_run_id, func_builder.func);
+        let sched_run_addr = func_builder
+            .ins()
+            .func_addr(self.obj_module.isa().pointer_type(), sched_run);
+        let res = func_builder.ins().call(atexit, &[sched_run_addr]);
+        let res = func_builder.inst_results(res)[0];
+        func_builder.ins().call(putchar, &[res]);
+
         match self.config.link_target {
             crate::TargetPlatform::Windows => {
-                let main_ctx = &self.ctx.functions["main"];
-                let main_fn = self
+                let sig = self.obj_module.make_signature();
+                let start_id = self
                     .obj_module
-                    .declare_func_in_func(main_ctx.func_id, func_builder.func);
-                func_builder.ins().call(main_fn, &[]);
-                func_builder.ins().return_(&[]);
+                    .declare_function("mainCRTStartup", cranelift_module::Linkage::Import, &sig)
+                    .into_diagnostic()?;
+
+                let start = self
+                    .obj_module
+                    .declare_func_in_func(start_id, func_builder.func);
+                func_builder.ins().call(start, &[]);
             }
             crate::TargetPlatform::Linux => {
                 let sig = self.obj_module.make_signature();
@@ -291,9 +340,10 @@ impl CodeGen {
                     .obj_module
                     .declare_func_in_func(start_id, func_builder.func);
                 func_builder.ins().call(start, &[]);
-                func_builder.ins().return_(&[]);
             }
         }
+
+        func_builder.ins().return_(&[]);
 
         info!("{}", func.display());
 
@@ -318,9 +368,15 @@ impl CodeGen {
                 let after_block = func_builder.create_block();
 
                 let test_val = self.compile_expr(func_builder, Some(TblType::Bool), test)?;
-                func_builder
-                    .ins()
-                    .brif(test_val, then_block, &[], else_block, &[]);
+                if else_.is_empty() {
+                    func_builder
+                        .ins()
+                        .brif(test_val, then_block, &[], after_block, &[]);
+                } else {
+                    func_builder
+                        .ins()
+                        .brif(test_val, then_block, &[], else_block, &[]);
+                }
 
                 func_builder.seal_block(then_block);
                 func_builder.seal_block(else_block);
@@ -364,7 +420,17 @@ impl CodeGen {
                 func_builder.ins().return_(&return_values);
             }
             Statement::Schedule { task, args } => {
-                func_builder.ins().return_(&[]);
+                self.compile_expr(
+                    func_builder,
+                    None,
+                    &Expression::Call {
+                        task: Box::new(Expression::Var("sched_enqueue".into())),
+                        args: vec![
+                            Expression::Var(task.clone()),
+                            Expression::Literal(Literal::Int(0)),
+                        ],
+                    },
+                )?;
             }
             Statement::VarDecl { name, type_, value } => {
                 let data = StackSlotData::new(StackSlotKind::ExplicitSlot, self.type_size(type_));
@@ -374,10 +440,6 @@ impl CodeGen {
                     .func_by_idx_mut(fn_idx as usize)
                     .ok_or(miette!("Could not find function with ID {fn_idx}"))?;
                 fn_ctx.declare_var(name, type_.clone(), slot);
-                info!(
-                    "Declared variable {name} with type {type_:?} ({} bytes)",
-                    self.type_size(type_)
-                );
                 let addr = func_builder.ins().stack_addr(
                     self.obj_module.isa().pointer_type(),
                     slot,
@@ -546,12 +608,8 @@ impl CodeGen {
                     }
                 }
             }
-            Expression::Call { task, args } => {
-                let task_name = match &**task {
-                    Expression::Var(t) => t,
-                    _ => unimplemented!(),
-                };
-                match self.ctx.functions.get(task_name) {
+            Expression::Call { task, args } => match &**task {
+                Expression::Var(task_name) => match self.ctx.functions.get(task_name) {
                     Some(func_ctx) => {
                         let func = self
                             .obj_module
@@ -630,8 +688,33 @@ impl CodeGen {
                             Ok(res[0])
                         }
                     }
+                },
+                expr => {
+                    let mut sig = self.obj_module.make_signature();
+                    for arg in args {
+                        sig.params.push(AbiParam::new(
+                            self.to_cranelift_type(&self.type_of(ctx, arg).unwrap())
+                                .unwrap(),
+                        ));
+                    }
+
+                    let callee = self.compile_lvalue(builder, expr)?;
+                    let mut arg_vals = vec![];
+                    for arg in args {
+                        let arg_val = self.compile_expr(builder, None, arg)?;
+                        arg_vals.push(arg_val);
+                    }
+
+                    let sig_ref = builder.import_signature(sig);
+                    let call = builder.ins().call_indirect(sig_ref, callee, &arg_vals);
+                    let res = builder.inst_results(call);
+                    if res.is_empty() {
+                        Ok(builder.ins().iconst(types::I8, 0))
+                    } else {
+                        Ok(res[0])
+                    }
                 }
-            }
+            },
             Expression::BinaryOperation {
                 left,
                 right,
@@ -681,11 +764,11 @@ impl CodeGen {
                 }
             }
             Expression::UnaryOperation { value, operator } => {
-                let ty = self.type_of(ctx, value).unwrap();
+                //let ty = self.type_of(ctx, value).unwrap();
                 let val = self.compile_expr(builder, type_hint.clone(), value)?;
                 match operator {
                     UnaryOperator::Dereference => Ok(builder.ins().load(
-                        self.to_cranelift_type(&ty).unwrap(),
+                        self.to_cranelift_type(&type_hint.unwrap()).unwrap(),
                         MemFlags::new(),
                         val,
                         Offset32::new(0),
@@ -872,12 +955,17 @@ impl CodeGen {
                 }
             }
             Expression::Index { value, at } => {
+                let TblType::Array { item, .. } = self.type_of(ctx, value).unwrap() else {
+                    panic!()
+                };
                 let addr = self.compile_lvalue(builder, value)?;
 
                 match &**at {
-                    Expression::Literal(Literal::Int(i)) => Ok(builder.ins().iadd_imm(addr, *i)),
+                    Expression::Literal(Literal::Int(i)) => Ok(builder
+                        .ins()
+                        .iadd_imm(addr, *i * self.type_size(&item) as i64)),
                     _ => {
-                        let offset = self.compile_expr(
+                        let item_offset = self.compile_expr(
                             builder,
                             Some(TblType::Integer {
                                 signed: false,
@@ -885,6 +973,9 @@ impl CodeGen {
                             }),
                             at,
                         )?;
+                        let offset = builder
+                            .ins()
+                            .imul_imm(item_offset, self.type_size(&item) as i64);
 
                         Ok(builder.ins().iadd(addr, offset))
                     }

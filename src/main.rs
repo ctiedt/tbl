@@ -58,6 +58,7 @@ fn link(file: &str, target: TargetPlatform) -> miette::Result<()> {
                     "-entry:_tbl_start",
                     &obj_name,
                     "ucrt.lib",
+                    "libcmt.lib",
                     "vcruntime.lib",
                     "legacy_stdio_definitions.lib",
                 ])

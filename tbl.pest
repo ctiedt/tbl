@@ -26,7 +26,8 @@ task_ptr = {"task" ~ "(" ~ task_ptr_args? ~ ")" ~ ("->" ~ #ptr_returns = type)? 
 task_ptr_args = _{ (#type = type ~ ",")* ~ (#type = type) }
 any = { "any" }
 
-statement = { #cond = conditional | (#var_decl = var_decl | #assign = assign | (#return = return) | #sched = ("schedule" ~ expression) | #exit = exit | (#expr = expression)) ~ ";" }
+statement = { #cond = conditional | (#var_decl = var_decl | #assign = assign | (#return = return) | #sched = sched | #exit = exit | (#expr = expression)) ~ ";" }
+sched = {"schedule" ~ #task = ident ~ "(" ~ arg_list ~ ")" }
 exit = { "exit" }
 return = { "return" ~ expression? }
 var_decl = { "var " ~ #name = ident ~ ":" ~ #type = type ~ "=" ~ #value = expression }

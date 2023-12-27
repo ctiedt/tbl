@@ -84,7 +84,7 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
             let pairs = pair.into_inner();
             let name = pairs
                 .find_first_tagged("name")
-                .ok_or(miette!("Task has no name"))?
+                .ok_or(miette!("Task has no name: {location:?}"))?
                 .as_str()
                 .to_string();
             let returns = pairs
@@ -223,8 +223,11 @@ pub fn parse_stmt(tokens: Pair<'_, Rule>) -> miette::Result<Statement> {
                 .ok_or(miette!("Task has no name"))?
                 .as_str()
                 .to_string();
-            let args: miette::Result<Vec<Expression>> =
-                pairs.clone().find_tagged("arg").map(parse_expr).collect();
+            let args: miette::Result<Vec<Expression>> = pairs
+                .clone()
+                .find_tagged("arg")
+                .map(|a| parse_expr(a.into_inner().next().unwrap()))
+                .collect();
             Ok(Statement::Schedule { task, args: args? })
         }
         Some("exit") => Ok(Statement::Exit),
@@ -283,7 +286,10 @@ pub fn parse_stmt(tokens: Pair<'_, Rule>) -> miette::Result<Statement> {
             )?;
             Ok(Statement::Assign { location, value })
         }
-        Some(t) => Err(miette!("Unknown tag for statement `{t}`")),
+        Some(t) => Err(miette!(
+            "Unknown tag for statement `{t}` (at {:?})",
+            pair.as_span()
+        )),
         None => Err(miette!("Statement `{}` is untagged", pair.as_str())),
     }
 }
