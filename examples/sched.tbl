@@ -1,41 +1,4 @@
-extern task printf(...);
-extern task Sleep(time: u32);
-
-struct Task {
-    task_: task(&any) -> &any,
-    args: &any
-}
-
-struct Scheduler {
-    tasks: [Task; 64],
-    num_tasks: i64,
-    current: i64
-}
-
-global SCHED: Scheduler = {tasks: [], num_tasks: 0, current: -1};
-
-task sched_enqueue(task_: task(&any) -> &any, args: &any) {
-    (SCHED.tasks)[SCHED.num_tasks] = {task_: task_, args: args};
-    SCHED.num_tasks = SCHED.num_tasks + 1;
-    if (SCHED.current == -1) {
-        SCHED.current = 0;
-    }
-}
-
-task sched_run() {
-   var current: i64 = SCHED.current;
-   var t: Task = (SCHED.tasks)[current];
-   var t1: task(&any) -> &any = t.task_;
-   var args: &any = t.args;
-   t1(args);
-   SCHED.current = SCHED.current + 1;
-   if (SCHED.current == SCHED.num_tasks) {
-        SCHED.current = 0;
-   }
-   Sleep(100);
-   sched_run();
-   return;
-}
+@using("examples/std.tbl");
 
 task foo(_: u32) {
     printf("Hello, foo\n");

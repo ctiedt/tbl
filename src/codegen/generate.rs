@@ -219,10 +219,15 @@ impl CodeGen {
                         },
                     );
                 }
+                Declaration::Directive { .. } => {
+                    unreachable!("Directives are handled by the preprocessor")
+                }
             }
         }
 
-        self.build_start()?;
+        if !self.config.compile_only {
+            self.build_start()?;
+        }
 
         let mut res = self.obj_module.finish();
 
@@ -657,7 +662,10 @@ impl CodeGen {
                         }
                     }
                     None => {
-                        let func_var = &ctx.vars[task_name];
+                        let func_var = ctx
+                            .vars
+                            .get(task_name)
+                            .ok_or(miette!("Could not find task `{task_name}`"))?;
                         let TblType::TaskPtr { params, returns } = &func_var.type_ else {
                             unreachable!()
                         };

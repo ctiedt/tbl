@@ -1,4 +1,4 @@
-extern task printf(...);
+@using("examples/std.tbl");
 
 task fac(n: u32) -> u32 {
     if (n == 0) {

@@ -188,6 +188,19 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
             )?;
             Ok(Declaration::Global { name, type_, value })
         }
+        Rule::directive => {
+            let pairs = pair.into_inner();
+            let name = pairs
+                .find_first_tagged("name")
+                .ok_or(miette!("Directive has no name"))?
+                .as_str()
+                .to_string();
+
+            let args: miette::Result<Vec<Literal>> =
+                pairs.find_tagged("arg").map(parse_literal).collect();
+
+            Ok(Declaration::Directive { name, args: args? })
+        }
         r => unreachable!("{r:?}"),
     }
 }
@@ -372,57 +385,7 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
                 let inner = tokens.into_inner().next().unwrap();
                 match inner.as_rule() {
                     Rule::ident => Ok(Expression::Var(inner.as_str().to_string())),
-                    Rule::value => {
-                        let val = inner.as_str();
-                        if val.starts_with('"') && val.ends_with('"') {
-                            let unescaped = snailquote::unescape(val).into_diagnostic()?;
-                            Ok(Expression::Literal(Literal::String(unescaped)))
-                        } else if val.starts_with('\'') && val.ends_with('\'') {
-                            let c = val.trim_matches('\'').chars().next().unwrap();
-                            Ok(Expression::Literal(Literal::Int(c as i64)))
-                        } else if val.chars().all(|c| c.is_ascii_digit()) {
-                            Ok(Expression::Literal(Literal::Int(
-                                val.parse().into_diagnostic()?,
-                            )))
-                        } else if val == "true" {
-                            Ok(Expression::Literal(Literal::Bool(true)))
-                        } else if val == "false" {
-                            Ok(Expression::Literal(Literal::Bool(false)))
-                        } else if val.starts_with('{') && val.ends_with('}') {
-                            let struct_val = inner
-                                .into_inner()
-                                .next()
-                                .ok_or(miette!("Struct should contain an inner pair"))?
-                                .into_inner();
-
-                            let member_names: Vec<String> = struct_val
-                                .clone()
-                                .find_tagged("member")
-                                .map(|p| p.as_str().to_string())
-                                .collect();
-                            let member_values: miette::Result<Vec<Expression>> = struct_val
-                                .clone()
-                                .find_tagged("value")
-                                .map(|p| parse_expr(p.into_inner().next().unwrap()))
-                                .collect();
-                            let members = member_names.into_iter().zip(member_values?).collect();
-
-                            Ok(Expression::Literal(Literal::Struct(members)))
-                        } else if val.starts_with('[') && val.ends_with(']') {
-                            let array_val = inner
-                                .into_inner()
-                                .next()
-                                .ok_or(miette!("Array should contain an inner pair"))?
-                                .into_inner();
-
-                            let values: miette::Result<Vec<Expression>> =
-                                array_val.map(parse_expr).collect();
-
-                            Ok(Expression::Literal(Literal::Array(values?)))
-                        } else {
-                            Err(miette!("unknown literal `{val}`"))
-                        }
-                    }
+                    Rule::value => Ok(Expression::Literal(parse_literal(inner)?)),
                     Rule::expression | Rule::call | Rule::struct_access => parse_expr(inner),
                     _ => unreachable!(),
                 }
@@ -434,6 +397,55 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
             r => unimplemented!("{r:?}"),
         },
         Some(tag) => Err(miette!("tag `{tag}` is unknown for expression")),
+    }
+}
+
+fn parse_literal(inner: Pair<Rule>) -> miette::Result<Literal> {
+    let val = inner.as_str();
+    if val.starts_with('"') && val.ends_with('"') {
+        let unescaped = snailquote::unescape(val).into_diagnostic()?;
+        Ok(Literal::String(unescaped))
+    } else if val.starts_with('\'') && val.ends_with('\'') {
+        let c = val.trim_matches('\'').chars().next().unwrap();
+        Ok(Literal::Int(c as i64))
+    } else if val.chars().all(|c| c.is_ascii_digit()) {
+        Ok(Literal::Int(val.parse().into_diagnostic()?))
+    } else if val == "true" {
+        Ok(Literal::Bool(true))
+    } else if val == "false" {
+        Ok(Literal::Bool(false))
+    } else if val.starts_with('{') && val.ends_with('}') {
+        let struct_val = inner
+            .into_inner()
+            .next()
+            .ok_or(miette!("Struct should contain an inner pair"))?
+            .into_inner();
+
+        let member_names: Vec<String> = struct_val
+            .clone()
+            .find_tagged("member")
+            .map(|p| p.as_str().to_string())
+            .collect();
+        let member_values: miette::Result<Vec<Expression>> = struct_val
+            .clone()
+            .find_tagged("value")
+            .map(|p| parse_expr(p.into_inner().next().unwrap()))
+            .collect();
+        let members = member_names.into_iter().zip(member_values?).collect();
+
+        Ok(Literal::Struct(members))
+    } else if val.starts_with('[') && val.ends_with(']') {
+        let array_val = inner
+            .into_inner()
+            .next()
+            .ok_or(miette!("Array should contain an inner pair"))?
+            .into_inner();
+
+        let values: miette::Result<Vec<Expression>> = array_val.map(parse_expr).collect();
+
+        Ok(Literal::Array(values?))
+    } else {
+        Err(miette!("unknown literal `{val}`"))
     }
 }
 

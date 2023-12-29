@@ -1,9 +1,9 @@
-extern task putchar(c: u32);
+@using("examples/std.tbl");
 
-task main() {
+task main() -> i32 {
     var b: bool = true;
     var b2: bool = false;
     b = false;
     var x: i8 = 32;
-    return;
+    return 0;
 }

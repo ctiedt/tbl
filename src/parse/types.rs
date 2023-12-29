@@ -99,6 +99,10 @@ pub enum Declaration {
         type_: Type,
         value: Expression,
     },
+    Directive {
+        name: String,
+        args: Vec<Literal>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

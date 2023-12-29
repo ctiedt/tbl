@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{panic::PanicInfo, path::PathBuf};
 
 use clap::Parser as ArgParser;
 use codegen::{CodeGen, Config};
@@ -10,6 +10,7 @@ use cranelift::prelude::{
 use miette::IntoDiagnostic;
 use pest::Parser;
 use pest_derive::Parser;
+use tracing::error;
 use tracing_subscriber::FmtSubscriber;
 
 use parse::parse_program;
@@ -27,6 +28,12 @@ struct Args {
     /// Whether to include debug info
     #[arg(short = 'g', default_value_t = true)]
     is_debug: bool,
+    #[arg(short = 'c', default_value_t = false)]
+    /// Whether to link the output with libc
+    compile_only: bool,
+    #[arg(default_value = "preprocess.py")]
+    /// The preprocessor implementation to use
+    preprocessor: String,
     /// File to compile
     file: PathBuf,
 }
@@ -57,10 +64,10 @@ fn link(file: &str, target: TargetPlatform) -> miette::Result<()> {
                     &format!("-out:{elf_name}.exe"),
                     "-entry:_tbl_start",
                     &obj_name,
-                    "ucrt.lib",
-                    "libcmt.lib",
-                    "vcruntime.lib",
                     "legacy_stdio_definitions.lib",
+                    "libcmt.lib",
+                    "libucrt.lib",
+                    "libvcruntime.lib",
                 ])
                 .spawn()
                 .into_diagnostic()?
@@ -94,8 +101,40 @@ fn link(file: &str, target: TargetPlatform) -> miette::Result<()> {
     Ok(())
 }
 
+fn report_compiler_panic(info: &PanicInfo) {
+    let commit_hash = match std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+    {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).to_string(),
+        Err(_) => String::from("Git info not available"),
+    };
+    let issue_info = format!(
+        r#"## Description and Reproduction
+
+Describe how the issue occurred.
+    
+## System Info
+
+- Panic Message: `{info}`
+- Host Triple: `{}`
+- Current Commit Hash: `{}`"#,
+        target_lexicon::HOST,
+        commit_hash.trim()
+    );
+    error!(
+        r#"It looks like you ran into a compiler panic.
+The message is: `{info}`
+If there is no issue referencing this panic, please open one:
+https://github.com/ctiedt/tbl/issues/new?title=Compiler+Panic&body={}"#,
+        urlencoding::encode(&issue_info)
+    );
+}
+
 fn main() -> miette::Result<()> {
     let args = Args::parse();
+
+    std::panic::set_hook(Box::new(report_compiler_panic));
 
     tracing::subscriber::set_global_default(FmtSubscriber::builder().pretty().finish())
         .into_diagnostic()?;
@@ -106,7 +145,7 @@ fn main() -> miette::Result<()> {
         .next()
         .unwrap();
 
-    let program = parse_program(parsed)?;
+    let program = parse_program(parsed, &args.preprocessor)?;
 
     let mut shared_builder = settings::builder();
     shared_builder.enable("is_pic").into_diagnostic()?;
@@ -124,12 +163,15 @@ fn main() -> miette::Result<()> {
         .into_owned();
     let config = Config {
         is_debug: args.is_debug,
+        compile_only: args.compile_only,
         filename: args.file,
         link_target: host_target(),
     };
     let codegen = CodeGen::new(mod_name.clone(), target, config)?;
     codegen.compile(program)?;
-    let link_target = host_target();
-    link(&mod_name, link_target)?;
+    if !args.compile_only {
+        let link_target = host_target();
+        link(&mod_name, link_target)?;
+    }
     Ok(())
 }
