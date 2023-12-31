@@ -31,7 +31,7 @@ struct Args {
     #[arg(short = 'c', default_value_t = false)]
     /// Whether to link the output with libc
     compile_only: bool,
-    #[arg(default_value = "preprocess.py")]
+    #[arg(short, long, default_value = "preprocess.py")]
     /// The preprocessor implementation to use
     preprocessor: String,
     /// File to compile
