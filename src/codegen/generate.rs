@@ -772,7 +772,21 @@ impl CodeGen {
                 }
             }
             Expression::UnaryOperation { value, operator } => {
-                //let ty = self.type_of(ctx, value).unwrap();
+                if matches!(operator, UnaryOperator::Reference) {
+                    let Expression::Var(v) = *value.clone() else {
+                        return Err(miette!(
+                            "Cannot take reference to something other than a variable"
+                        ));
+                    };
+                    let ctx = &self.ctx.func_by_idx(fn_idx as usize);
+                    let var = &ctx.vars[&v];
+                    return Ok(builder.ins().stack_addr(
+                        self.obj_module.target_config().pointer_type(),
+                        var.slot,
+                        Offset32::new(0),
+                    ));
+                }
+
                 let val = self.compile_expr(builder, type_hint.clone(), value)?;
                 match operator {
                     UnaryOperator::Dereference => Ok(builder.ins().load(
@@ -784,18 +798,7 @@ impl CodeGen {
                     UnaryOperator::Not => Ok(builder.ins().bnot(val)),
                     UnaryOperator::Minus => Ok(builder.ins().ineg(val)),
                     UnaryOperator::Reference => {
-                        let Expression::Var(v) = *value.clone() else {
-                            return Err(miette!(
-                                "Cannot take reference to something other than a variable"
-                            ));
-                        };
-                        let ctx = &self.ctx.func_by_idx(fn_idx as usize);
-                        let var = &ctx.vars[&v];
-                        Ok(builder.ins().stack_addr(
-                            self.obj_module.target_config().pointer_type(),
-                            var.slot,
-                            Offset32::new(0),
-                        ))
+                        unreachable!()
                     }
                 }
             }
@@ -905,12 +908,12 @@ impl CodeGen {
         expr: &Expression,
     ) -> miette::Result<Value> {
         let fn_idx = builder.func.name.get_user().unwrap().index;
-        let ctx = &self.ctx.func_by_idx(fn_idx as usize);
+        let ctx = self.ctx.func_by_idx(fn_idx as usize).clone();
         match expr {
             Expression::Var(v) => {
                 match self
                     .ctx
-                    .resolve_name(ctx, v)
+                    .resolve_name(&ctx, v)
                     .ok_or(miette!("Failed to resolve name `{v}`"))?
                 {
                     Symbol::Variable(var) => Ok(builder.ins().stack_addr(
@@ -930,40 +933,26 @@ impl CodeGen {
                 }
             }
             Expression::StructAccess { value, member } => {
-                let ty_name = self.type_of(ctx, value).unwrap().name();
-                let ty = &self.ctx.types[&ty_name].members;
+                let ty = self.type_of(&ctx, value).unwrap();
+                let ty_members = &self.ctx.types[&ty.name()].members;
 
                 let mut offset = 0;
                 let mut idx = 0;
-                while &ty[idx].0 != member {
-                    offset += self.type_size(&ty[idx].1);
+                while &ty_members[idx].0 != member {
+                    offset += self.type_size(&ty_members[idx].1);
                     idx += 1;
                 }
 
-                let Expression::Var(ref val) = **value else {
-                    unreachable!()
-                };
+                let lhs = self.compile_lvalue(builder, value)?;
 
-                match self.ctx.resolve_name(ctx, val).unwrap() {
-                    Symbol::Variable(var) => Ok(builder.ins().stack_addr(
-                        self.obj_module.isa().pointer_type(),
-                        var.slot,
-                        Offset32::new(offset as i32),
-                    )),
-                    Symbol::Function(_) => unimplemented!(),
-                    Symbol::Global(global) => {
-                        let data = self
-                            .obj_module
-                            .declare_data_in_func(global.id, builder.func);
-                        let base_addr = builder
-                            .ins()
-                            .global_value(self.obj_module.isa().pointer_type(), data);
-                        Ok(builder.ins().iadd_imm(base_addr, offset as i64))
-                    }
-                }
+                let offset_val = builder.ins().iconst(
+                    self.obj_module.target_config().pointer_type(),
+                    offset as i64,
+                );
+                Ok(builder.ins().iadd(lhs, offset_val))
             }
             Expression::Index { value, at } => {
-                let TblType::Array { item, .. } = self.type_of(ctx, value).unwrap() else {
+                let TblType::Array { item, .. } = self.type_of(&ctx, value).unwrap() else {
                     panic!()
                 };
                 let addr = self.compile_lvalue(builder, value)?;
@@ -989,6 +978,10 @@ impl CodeGen {
                     }
                 }
             }
+            Expression::UnaryOperation {
+                value,
+                operator: UnaryOperator::Dereference,
+            } => self.compile_expr(builder, self.type_of(&ctx, value), value),
             e => Err(miette!("Illegal expression for lvalue: {e:?}")),
         }
     }
@@ -1030,12 +1023,23 @@ impl CodeGen {
                     self.type_of(ctx, right)
                 }
             }
-            Expression::UnaryOperation { value, .. } => self.type_of(ctx, value),
+            Expression::UnaryOperation { value, operator } => match operator {
+                UnaryOperator::Dereference => {
+                    if let TblType::Pointer(t) = self.type_of(ctx, value)? {
+                        Some(*t)
+                    } else {
+                        unreachable!("{value:?}")
+                    }
+                }
+                UnaryOperator::Not | UnaryOperator::Minus => self.type_of(ctx, value),
+                UnaryOperator::Reference => {
+                    Some(TblType::Pointer(Box::new(self.type_of(ctx, value)?)))
+                }
+            },
             Expression::StructAccess { value, member } => {
-                // TODO: check member type
                 let struct_name = match self.type_of(ctx, value).unwrap() {
                     TblType::Named(n) => n,
-                    _ => unimplemented!(),
+                    t => unimplemented!("{t:?}"),
                 };
                 let struct_ty = &self.ctx.types[&struct_name];
                 let member_idx = struct_ty.member_idx(member);
