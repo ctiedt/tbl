@@ -296,6 +296,12 @@ impl CodeGen {
         func_builder.seal_block(fn_entry);
 
         let param = func_builder.block_params(fn_entry)[0];
+        let param = func_builder.ins().load(
+            self.obj_module.isa().pointer_type(),
+            MemFlags::new(),
+            param,
+            Offset32::new(0),
+        );
 
         let wrapped_func = self
             .obj_module
@@ -480,14 +486,13 @@ impl CodeGen {
                 );
                 let mut offset = 0;
                 for (arg, (_, ty)) in args.iter().zip(&arg_ty.members) {
-                    //let val = self.compile_expr(func_builder, self.type_of(&ctx, arg), arg)?;
                     self.store_expr(func_builder, ty, addr, offset, arg)?;
                     offset += self.type_size(ty) as i32;
                 }
                 let ctx = self.ctx.func_by_idx_mut(fn_idx as usize).unwrap();
                 ctx.declare_var(
                     "args",
-                    TblType::Pointer(Box::new(TblType::Named(ty_name))),
+                    TblType::Pointer(Box::new(TblType::Named(ty_name.clone()))),
                     slot,
                 );
                 self.compile_expr(
@@ -497,10 +502,12 @@ impl CodeGen {
                         task: Box::new(Expression::Var("sched_enqueue".into())),
                         args: vec![
                             Expression::Var(format!("__{task}_wrapper")),
-                            //Expression::Literal(Literal::Int(0)),
                             Expression::UnaryOperation {
                                 value: Box::new(Expression::Var(String::from("args"))),
                                 operator: UnaryOperator::Reference,
+                            },
+                            Expression::SizeOf {
+                                value: TblType::Named(ty_name),
                             },
                         ],
                     },
@@ -850,18 +857,7 @@ impl CodeGen {
             }
             Expression::UnaryOperation { value, operator } => {
                 if matches!(operator, UnaryOperator::Reference) {
-                    let Expression::Var(v) = *value.clone() else {
-                        return Err(miette!(
-                            "Cannot take reference to something other than a variable"
-                        ));
-                    };
-                    let ctx = &self.ctx.func_by_idx(fn_idx as usize);
-                    let var = &ctx.vars[&v];
-                    return Ok(builder.ins().stack_addr(
-                        self.obj_module.target_config().pointer_type(),
-                        var.slot,
-                        Offset32::new(0),
-                    ));
+                    return self.compile_lvalue(builder, value);
                 }
 
                 let val = self.compile_expr(builder, type_hint.clone(), value)?;
