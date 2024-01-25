@@ -1,4 +1,5 @@
-use std::{panic::PanicInfo, path::PathBuf};
+#![feature(backtrace_frames)]
+use std::{backtrace::Backtrace, panic::PanicInfo, path::PathBuf};
 
 use clap::Parser as ArgParser;
 use codegen::{CodeGen, Config};
@@ -26,7 +27,7 @@ struct TblParser;
 #[command(author, version, about)]
 struct Args {
     /// Whether to include debug info
-    #[arg(short = 'g', default_value_t = true)]
+    #[arg(short = 'g', default_value_t = false)]
     is_debug: bool,
     #[arg(short = 'c', default_value_t = false)]
     /// Whether to link the output with libc
@@ -62,7 +63,7 @@ fn link(file: &str, target: TargetPlatform) -> miette::Result<()> {
             std::process::Command::new("link.exe")
                 .args([
                     &format!("-out:{elf_name}.exe"),
-                    "-entry:_tbl_start",
+                    //"-entry:_tbl_start",
                     &obj_name,
                     "legacy_stdio_definitions.lib",
                     "libcmt.lib",
@@ -82,8 +83,8 @@ fn link(file: &str, target: TargetPlatform) -> miette::Result<()> {
                     "-L/usr/lib",
                     "-L/lib",
                     "-L/lib/x86_64-linux-gnu",
-                    "-e",
-                    "_tbl_start",
+                    //"-e",
+                    //"_tbl_start",
                     "-dynamic-linker",
                     "/lib64/ld-linux-x86-64.so.2",
                     "-l:crt1.o",
@@ -102,6 +103,12 @@ fn link(file: &str, target: TargetPlatform) -> miette::Result<()> {
 }
 
 fn report_compiler_panic(info: &PanicInfo) {
+    if std::env::var("RUST_BACKTRACE").is_ok() {
+        let bt = Backtrace::capture();
+        //let trace = bt.frames().iter().map(|f| format!("{f:?}", f.)).join("\n");
+        error!("{bt:?}");
+    }
+
     let commit_hash = match std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()
@@ -134,7 +141,7 @@ https://github.com/ctiedt/tbl/issues/new?title=Compiler+Panic&body={}"#,
 fn main() -> miette::Result<()> {
     let args = Args::parse();
 
-    std::panic::set_hook(Box::new(report_compiler_panic));
+    //std::panic::set_hook(Box::new(report_compiler_panic));
 
     tracing::subscriber::set_global_default(FmtSubscriber::builder().pretty().finish())
         .into_diagnostic()?;

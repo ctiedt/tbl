@@ -127,6 +127,11 @@ impl CodeGen {
 
                     info!("{name}({:?}) -> {returns:?}", params);
 
+                    let name = match name.as_str() {
+                        "main" => "__main",
+                        other => other,
+                    };
+
                     let func_id = self
                         .obj_module
                         .declare_function(name, cranelift_module::Linkage::Export, &sig)
@@ -191,6 +196,9 @@ impl CodeGen {
                     self.obj_module
                         .define_function(func_id, &mut ctx)
                         .into_diagnostic()?;
+
+                    let fn_ctx = self.ctx.functions.get(name).unwrap().clone();
+                    self.build_wrapper(name, fn_ctx)?;
                 }
                 Declaration::Struct { name, members } => self.ctx.insert_type(
                     name.clone(),
@@ -242,11 +250,98 @@ impl CodeGen {
         Ok(())
     }
 
+    fn build_wrapper(&mut self, name: &str, fn_ctx: FunctionContext) -> miette::Result<()> {
+        let params_name = format!("__{name}_args");
+        self.ctx.insert_type(
+            params_name.clone(),
+            StructContext {
+                members: fn_ctx.params.clone(),
+            },
+        );
+        let params_ty = self.ctx.types[&params_name].clone();
+
+        let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
+        sig.params.push(AbiParam::new(
+            self.obj_module.target_config().pointer_type(),
+        ));
+
+        let func_name = format!("__{name}_wrapper");
+
+        let func_id = self
+            .obj_module
+            .declare_function(&func_name, cranelift_module::Linkage::Export, &sig)
+            .into_diagnostic()?;
+
+        let fn_idx = self.insert_func(
+            &func_name,
+            func_id,
+            vec![(
+                String::from("args"),
+                TblType::Pointer(Box::new(TblType::Named(params_name))),
+            )],
+            None,
+            false,
+            false,
+            Location { line: 0, column: 0 },
+        );
+        let fn_name = UserFuncName::user(0, fn_idx as u32);
+
+        let mut func = Function::with_name_signature(fn_name, sig);
+        let mut func_ctx = FunctionBuilderContext::new();
+        let mut func_builder = FunctionBuilder::new(&mut func, &mut func_ctx);
+
+        let fn_entry = func_builder.create_block();
+        func_builder.append_block_params_for_function_params(fn_entry);
+        func_builder.switch_to_block(fn_entry);
+        func_builder.seal_block(fn_entry);
+
+        let param = func_builder.block_params(fn_entry)[0];
+
+        let wrapped_func = self
+            .obj_module
+            .declare_func_in_func(fn_ctx.func_id, func_builder.func);
+        let mut args = vec![];
+        let mut offset = 0;
+        for (_, ty) in &params_ty.members {
+            let arg = func_builder.ins().load(
+                self.to_cranelift_type(ty).unwrap(),
+                MemFlags::new(),
+                param,
+                Offset32::new(offset),
+            );
+            offset += self.type_size(ty) as i32;
+            args.push(arg);
+        }
+        func_builder.ins().call(wrapped_func, &args);
+        func_builder.ins().return_(&[]);
+
+        info!("{func_name}");
+        info!("{}", func_builder.func.display());
+        func_builder.finalize();
+
+        let mut ctx = Context::for_function(func);
+
+        ctx.compute_cfg();
+        ctx.compute_domtree();
+        ctx.verify(self.obj_module.isa()).into_diagnostic()?;
+        ctx.dce(self.obj_module.isa()).into_diagnostic()?;
+        ctx.eliminate_unreachable_code(self.obj_module.isa())
+            .into_diagnostic()?;
+        ctx.replace_redundant_loads().into_diagnostic()?;
+        ctx.egraph_pass(self.obj_module.isa()).into_diagnostic()?;
+
+        self.obj_module
+            .define_function(func_id, &mut ctx)
+            .into_diagnostic()?;
+
+        Ok(())
+    }
+
     fn build_start(&mut self) -> miette::Result<()> {
         let sig = Signature::new(self.obj_module.isa().default_call_conv());
         let func_id = self
             .obj_module
-            .declare_function("_tbl_start", cranelift_module::Linkage::Export, &sig)
+            .declare_function("main", cranelift_module::Linkage::Export, &sig)
             .into_diagnostic()?;
         let mut func = Function::new();
         func.signature = sig;
@@ -276,34 +371,10 @@ impl CodeGen {
             )?;
         }
 
-        let putchar_id = match self.ctx.functions.get("putchar") {
-            Some(fun) => fun.func_id,
-            None => {
-                let mut sig = self.obj_module.make_signature();
-                sig.params.push(AbiParam::new(types::I32));
-                sig.returns.push(AbiParam::new(types::I32));
-                self.obj_module
-                    .declare_function("putchar", cranelift_module::Linkage::Import, &sig)
-                    .into_diagnostic()?
-            }
-        };
-
-        let putchar = self
+        let main_ctx = self.ctx.functions.get("__main").unwrap();
+        let main_ref = self
             .obj_module
-            .declare_func_in_func(putchar_id, func_builder.func);
-
-        let mut sig = self.obj_module.make_signature();
-        sig.params
-            .push(AbiParam::new(self.obj_module.isa().pointer_type()));
-        sig.returns.push(AbiParam::new(types::I32));
-        let atexit_id = self
-            .obj_module
-            .declare_function("atexit", cranelift_module::Linkage::Import, &sig)
-            .into_diagnostic()?;
-
-        let atexit = self
-            .obj_module
-            .declare_func_in_func(atexit_id, func_builder.func);
+            .declare_func_in_func(main_ctx.func_id, func_builder.func);
 
         let sig = self.obj_module.make_signature();
         let sched_run_id = self
@@ -314,39 +385,9 @@ impl CodeGen {
         let sched_run = self
             .obj_module
             .declare_func_in_func(sched_run_id, func_builder.func);
-        let sched_run_addr = func_builder
-            .ins()
-            .func_addr(self.obj_module.isa().pointer_type(), sched_run);
-        let res = func_builder.ins().call(atexit, &[sched_run_addr]);
-        let res = func_builder.inst_results(res)[0];
-        func_builder.ins().call(putchar, &[res]);
 
-        match self.config.link_target {
-            crate::TargetPlatform::Windows => {
-                let sig = self.obj_module.make_signature();
-                let start_id = self
-                    .obj_module
-                    .declare_function("mainCRTStartup", cranelift_module::Linkage::Import, &sig)
-                    .into_diagnostic()?;
-
-                let start = self
-                    .obj_module
-                    .declare_func_in_func(start_id, func_builder.func);
-                func_builder.ins().call(start, &[]);
-            }
-            crate::TargetPlatform::Linux => {
-                let sig = self.obj_module.make_signature();
-                let start_id = self
-                    .obj_module
-                    .declare_function("_start", cranelift_module::Linkage::Import, &sig)
-                    .into_diagnostic()?;
-
-                let start = self
-                    .obj_module
-                    .declare_func_in_func(start_id, func_builder.func);
-                func_builder.ins().call(start, &[]);
-            }
-        }
+        func_builder.ins().call(main_ref, &[]);
+        func_builder.ins().call(sched_run, &[]);
 
         func_builder.ins().return_(&[]);
 
@@ -365,7 +406,6 @@ impl CodeGen {
         stmt: &Statement,
     ) -> miette::Result<()> {
         let fn_idx = func_builder.func.name.get_user().unwrap().index;
-        let ctx = &self.ctx.func_by_idx(fn_idx as usize);
         match stmt {
             Statement::Conditional { test, then, else_ } => {
                 let then_block = func_builder.create_block();
@@ -414,6 +454,7 @@ impl CodeGen {
                 self.compile_expr(func_builder, None, expr)?;
             }
             Statement::Return(v) => {
+                let ctx = self.ctx.func_by_idx(fn_idx as usize);
                 let mut return_values = vec![];
                 if let Some(expr) = v {
                     return_values.push(self.compile_expr(
@@ -425,14 +466,42 @@ impl CodeGen {
                 func_builder.ins().return_(&return_values);
             }
             Statement::Schedule { task, args } => {
+                let ty_name = format!("__{task}_args");
+                let arg_ty = self.ctx.types.get(&ty_name).unwrap().clone();
+                let data = StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    self.type_size(&TblType::Named(ty_name.clone())),
+                );
+                let slot = func_builder.create_sized_stack_slot(data);
+                let addr = func_builder.ins().stack_addr(
+                    self.obj_module.isa().pointer_type(),
+                    slot,
+                    Offset32::new(0),
+                );
+                let mut offset = 0;
+                for (arg, (_, ty)) in args.iter().zip(&arg_ty.members) {
+                    //let val = self.compile_expr(func_builder, self.type_of(&ctx, arg), arg)?;
+                    self.store_expr(func_builder, ty, addr, offset, arg)?;
+                    offset += self.type_size(ty) as i32;
+                }
+                let ctx = self.ctx.func_by_idx_mut(fn_idx as usize).unwrap();
+                ctx.declare_var(
+                    "args",
+                    TblType::Pointer(Box::new(TblType::Named(ty_name))),
+                    slot,
+                );
                 self.compile_expr(
                     func_builder,
                     None,
                     &Expression::Call {
                         task: Box::new(Expression::Var("sched_enqueue".into())),
                         args: vec![
-                            Expression::Var(task.clone()),
-                            Expression::Literal(Literal::Int(0)),
+                            Expression::Var(format!("__{task}_wrapper")),
+                            //Expression::Literal(Literal::Int(0)),
+                            Expression::UnaryOperation {
+                                value: Box::new(Expression::Var(String::from("args"))),
+                                operator: UnaryOperator::Reference,
+                            },
                         ],
                     },
                 )?;
@@ -453,6 +522,7 @@ impl CodeGen {
                 self.store_expr(func_builder, type_, addr, 0, value)?;
             }
             Statement::Assign { location, value } => {
+                let ctx = self.ctx.func_by_idx(fn_idx as usize);
                 let type_ = self.type_of(ctx, location).unwrap();
                 let loc = self.compile_lvalue(func_builder, location)?;
                 self.store_expr(func_builder, &type_, loc, 0, value)?;
@@ -532,7 +602,6 @@ impl CodeGen {
         expr: &Expression,
     ) -> miette::Result<Value> {
         let fn_idx = builder.func.name.get_user().unwrap().index;
-        let ctx = &self.ctx.func_by_idx(fn_idx as usize);
         match expr {
             Expression::Literal(literal) => match literal {
                 Literal::Int(i) => {
@@ -577,6 +646,7 @@ impl CodeGen {
                 }
             },
             Expression::Var(v) => {
+                let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                 match self
                     .ctx
                     .resolve_name(ctx, v)
@@ -623,7 +693,11 @@ impl CodeGen {
                         if func_ctx.is_variadic {
                             let mut arg_vals = vec![];
                             for arg in args {
-                                let v = self.compile_expr(builder, None, arg)?;
+                                let ty_hint = {
+                                    let ctx = &self.ctx.func_by_idx(fn_idx as usize);
+                                    self.type_of(ctx, arg)
+                                };
+                                let v = self.compile_expr(builder, ty_hint, arg)?;
                                 arg_vals.push(v);
                             }
                             let call = builder.ins().call(func, &arg_vals);
@@ -662,6 +736,7 @@ impl CodeGen {
                         }
                     }
                     None => {
+                        let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                         let func_var = ctx
                             .vars
                             .get(task_name)
@@ -698,6 +773,7 @@ impl CodeGen {
                     }
                 },
                 expr => {
+                    let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                     let mut sig = self.obj_module.make_signature();
                     for arg in args {
                         sig.params.push(AbiParam::new(
@@ -728,6 +804,7 @@ impl CodeGen {
                 right,
                 operator,
             } => {
+                let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                 let type_hint_left = self.type_of(ctx, left);
                 let type_hint_right = self.type_of(ctx, right);
                 let th = match (type_hint_left, type_hint_right) {
@@ -803,6 +880,7 @@ impl CodeGen {
                 }
             }
             Expression::StructAccess { value, member } => {
+                let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                 let ty_name = self.type_of(ctx, value).unwrap().name();
                 let ty = &self.ctx.types[&ty_name].members;
 
@@ -849,6 +927,7 @@ impl CodeGen {
                 }
             }
             Expression::Cast { value, to } => {
+                let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                 let current_ty = self
                     .type_of(ctx, value)
                     .ok_or(miette!("Type to cast from must be known"))?;
@@ -876,6 +955,7 @@ impl CodeGen {
                 }
             }
             Expression::Index { value, at } => {
+                let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                 let ty = self.type_of(ctx, value).unwrap();
                 let TblType::Array { item, .. } = ty else {
                     unreachable!()
@@ -899,6 +979,10 @@ impl CodeGen {
                     Offset32::new(0),
                 ))
             }
+            Expression::SizeOf { value } => Ok(builder.ins().iconst(
+                self.obj_module.isa().pointer_type(),
+                self.type_size(value) as i64,
+            )),
         }
     }
 
@@ -1053,6 +1137,10 @@ impl CodeGen {
                     _ => None,
                 }
             }
+            Expression::SizeOf { .. } => Some(TblType::Integer {
+                signed: false,
+                width: self.obj_module.isa().pointer_bits(),
+            }),
         }
     }
 

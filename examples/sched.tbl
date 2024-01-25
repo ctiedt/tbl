@@ -1,18 +1,21 @@
 @using("examples/std.tbl");
 
-task foo(_: u32) {
-    printf("Hello, foo\n");
+task foo(n: &u32) {
+    printf("Hello, foo %d\n", *n);
+    *n = *n + 1;
     return;
 }
 
-task bar(_: u32) {
-    printf("Hello, bar\n");
+task bar(n: &u32) {
+    printf("Hello, bar %d\n", *n);
+    *n = *n + 1;
     return;
 }
 
 task main() -> i32 {
-    schedule foo(0);
-    schedule bar(0);
+    var n: u32 = 0;
+    schedule foo(&n);
+    schedule bar(&n);
     //sched_run();
     return 0;
 }

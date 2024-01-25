@@ -69,7 +69,7 @@ pub fn parse_type(tokens: Pair<'_, Rule>) -> miette::Result<Type> {
             })
         }
         Rule::any => Ok(Type::Any),
-        _ => unreachable!(),
+        u => unreachable!("{u:?}"),
     }
 }
 
@@ -386,6 +386,12 @@ pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
                 match inner.as_rule() {
                     Rule::ident => Ok(Expression::Var(inner.as_str().to_string())),
                     Rule::value => Ok(Expression::Literal(parse_literal(inner)?)),
+                    Rule::sizeof => {
+                        let inner = inner.into_inner().next().unwrap();
+                        Ok(Expression::SizeOf {
+                            value: parse_type(inner)?,
+                        })
+                    }
                     Rule::expression | Rule::call | Rule::struct_access => parse_expr(inner),
                     _ => unreachable!(),
                 }

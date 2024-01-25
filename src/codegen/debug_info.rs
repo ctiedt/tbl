@@ -44,8 +44,9 @@ impl DebugInfoGenerator {
         let mut dwarf = DwarfUnit::new(encoding);
 
         let only_filename = config.filename.file_name().unwrap().to_str().unwrap();
-        let dirname = std::env::current_dir().unwrap();
-        let dirname = dirname.to_str().unwrap();
+        //let dirname = std::env::current_dir().unwrap();
+        let dirname = config.filename.parent().unwrap().to_str().unwrap();
+        //let dirname = dirname.to_str().unwrap();
 
         let mut line_program = LineProgram::new(
             encoding,
@@ -259,6 +260,13 @@ impl DebugInfoGenerator {
                 int_die.set(DW_AT_encoding, AttributeValue::Encoding(DW_ATE_unsigned));
             }
         }
+        let any_id = self.dwarf.unit.add(root, DW_TAG_base_type);
+        self.type_defs.insert("any".into(), any_id);
+        let any_die = self.dwarf.unit.get_mut(any_id);
+        any_die.set(
+            DW_AT_name,
+            AttributeValue::StringRef(self.dwarf.strings.add("any")),
+        );
     }
 }
 

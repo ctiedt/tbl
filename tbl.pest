@@ -62,7 +62,8 @@ cast = { "as" ~ #to = type }
 call = { "(" ~ arg_list? ~ ")" }
 index = { "[" ~ expression ~ "]" }
 
-primary = { value | ident | "(" ~ expression ~ ")" }
+primary = { value | ident | sizeof | "(" ~ expression ~ ")" }
+sizeof = { "#" ~ type }
 
 arg_list = _{ (#arg = expression ~ ",")* ~ #arg = expression }
 

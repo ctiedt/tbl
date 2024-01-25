@@ -1,0 +1,18 @@
+@using("examples/std.tbl");
+
+struct Point {
+    x: u16,
+    y: u16
+}
+
+struct Rect {
+    upper_left: Point,
+    lower_right: Point
+}
+
+task main() -> u32 {
+    printf("%d\n", #u32);
+    printf("%d\n", #Point);
+    printf("%d\n", #Rect);
+    return 0;
+}

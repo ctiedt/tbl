@@ -159,6 +159,9 @@ pub enum Expression {
         value: Box<Expression>,
         at: Box<Expression>,
     },
+    SizeOf {
+        value: Type,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
