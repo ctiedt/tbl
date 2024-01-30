@@ -454,7 +454,14 @@ impl CodeGen {
                 func_builder.switch_to_block(after_block);
             }
             Statement::Exit => {
-                func_builder.ins().return_(&[]);
+                self.compile_expr(
+                    func_builder,
+                    None,
+                    &Expression::Call {
+                        task: Box::new(Expression::Var("sched_exit".into())),
+                        args: vec![],
+                    },
+                )?;
             }
             Statement::Expression(expr) => {
                 self.compile_expr(func_builder, None, expr)?;
@@ -514,6 +521,7 @@ impl CodeGen {
                 )?;
             }
             Statement::VarDecl { name, type_, value } => {
+                dbg!(name, type_);
                 let data = StackSlotData::new(StackSlotKind::ExplicitSlot, self.type_size(type_));
                 let slot = func_builder.create_sized_stack_slot(data);
                 let fn_ctx = self
@@ -822,6 +830,7 @@ impl CodeGen {
                         if l == r {
                             Some(l)
                         } else {
+                            println!("{left:?}, {right:?}");
                             return Err(miette!("Conflicting types `{l:?}` and `{r:?}`"));
                         }
                     }

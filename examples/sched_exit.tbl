@@ -2,13 +2,16 @@
 
 task foo(n: &u32) {
     printf("Hello, foo %d\n", *n);
-    *n = *n + 1;
+    if (*n < 4) {
+        *n = *n + 1;
+    } else {
+        exit;
+    }
     return;
 }
 
 task bar(n: &u32) {
     printf("Hello, bar %d\n", *n);
-    *n = *n + 1;
     return;
 }
 
@@ -16,6 +19,5 @@ task main() -> i32 {
     var n: u32 = 0;
     schedule foo(&n);
     schedule bar(&n);
-    // sched_run();
     return 0;
 }

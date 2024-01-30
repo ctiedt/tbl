@@ -12,6 +12,7 @@ pub fn parse_type(tokens: Pair<'_, Rule>) -> miette::Result<Type> {
         .into_inner()
         .next()
         .ok_or(miette!("Declaration should contain one inner pair"))?;
+    println!("{} {:?}", pair.as_str(), pair.as_rule());
     match pair.as_rule() {
         Rule::bool => Ok(Type::Bool),
         Rule::integer => {
@@ -97,7 +98,7 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
                 .map(|p| p.as_str().to_string());
             let param_types: miette::Result<Vec<Type>> = pairs
                 .clone()
-                .find_tagged("type")
+                .find_tagged("param_type")
                 .map(|p| parse_type(p))
                 .collect();
             let params = param_names.zip(param_types?).collect();
@@ -133,7 +134,7 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
                     .map(|p| p.as_str().to_string());
                 let param_types: miette::Result<Vec<Type>> = pairs
                     .clone()
-                    .find_tagged("type")
+                    .find_tagged("param_type")
                     .map(|p| parse_type(p))
                     .collect();
                 let params = param_names.zip(param_types?).collect();
@@ -153,16 +154,19 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
                 .ok_or(miette!("Struct has no name"))?
                 .as_str()
                 .to_string();
-            let param_names = pairs
+            let param_names: Vec<_> = pairs
                 .clone()
                 .find_tagged("param")
-                .map(|p| p.as_str().to_string());
+                .map(|p| p.as_str().to_string())
+                .collect();
             let param_types: miette::Result<Vec<Type>> = pairs
                 .clone()
-                .find_tagged("type")
+                .find_tagged("param_type")
                 .map(|p| parse_type(p))
                 .collect();
-            let members = param_names.zip(param_types?).collect();
+
+            dbg!(&param_names, &param_types);
+            let members = param_names.into_iter().zip(param_types?).collect();
 
             Ok(Declaration::Struct { name, members })
         }

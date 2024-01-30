@@ -15,7 +15,7 @@ struct = { "struct" ~ (#name = ident) ~ "{" ~ param_list ~ "}" }
 
 global = { "global" ~ (#name = ident) ~ ":" ~ #type = type ~ "=" ~ #value = expression ~ ";" }
 
-param_list = _{ (#param = ident ~ ":" ~ #type = type ~ ",")* ~ (#param = ident ~ ":" ~ #type = type) }
+param_list = _{ (#param = ident ~ ":" ~ #param_type = type ~ ",")* ~ (#param = ident ~ ":" ~ #param_type = type) }
 
 ident = @{ (ASCII_ALPHA | "_")+ ~ (ASCII_ALPHANUMERIC | "_")* }
 

@@ -1,0 +1,38 @@
+{
+  "name": "tbl",
+  "displayName": "tbl",
+  "description": "Task-based Language",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "repository": {
+    "url": "https://github.com/ctiedt/tbl"
+  },
+  "license": "MIT",
+  "contributes": {
+    "languages": [
+      {
+        "id": "tbl",
+        "aliases": [
+          "Task-Based Language",
+          "tbl"
+        ],
+        "extensions": [
+          ".tbl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "tbl",
+        "scopeName": "source.tbl",
+        "path": "./syntaxes/tbl.tmLanguage.json"
+      }
+    ]
+  }
+}

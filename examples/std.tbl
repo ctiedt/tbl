@@ -9,7 +9,8 @@ extern task putchar(c: u32);
 
 struct Task {
     task_: task(&any) -> &any,
-    args: &any
+    args: &any,
+    running: bool
 }
 
 struct Scheduler {
@@ -19,14 +20,20 @@ struct Scheduler {
 }
 
 global SCHED: Scheduler = {tasks: [], num_tasks: 0, current: -1};
+global TASK_EXITED: bool = false;
 
 task sched_enqueue(task_: task(&any) -> &any, args: &any, arg_size: u64) {
-    ((SCHED.tasks)[SCHED.num_tasks]).task_ = task_;
+    ((SCHED.tasks)[SCHED.num_tasks]).task_ = task_; //= {task_: task_, args: 0, running: true};
     memcpy(&(((SCHED.tasks)[SCHED.num_tasks]).args), args, arg_size);
+    ((SCHED.tasks)[SCHED.num_tasks]).running = true;
     SCHED.num_tasks = SCHED.num_tasks + 1;
     if (SCHED.current == -1) {
         SCHED.current = 0;
     }
+}
+
+task sched_exit() {
+    TASK_EXITED = true;
 }
 
 task sched_run() {
@@ -35,9 +42,16 @@ task sched_run() {
     return;
    }
    var t: Task = (SCHED.tasks)[current];
-   var t1: task(&any) -> &any = t.task_;
-   var args: &any = t.args;
-   t1(args);
+   //printf("%d\n", t.running);
+   if t.running == true {
+        var t1: task(&any) -> &any = t.task_;
+        var args: &any = t.args;
+        t1(args);
+        //if TASK_EXITED {
+        // ((SCHED.tasks)[current]).running = false;
+        // TASK_EXITED = false;
+        //}
+   }
    SCHED.current = SCHED.current + 1;
    if (SCHED.current == SCHED.num_tasks) {
         SCHED.current = 0;

@@ -1,0 +1,100 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Task-Based Language",
+  "patterns": [
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#vars"
+    }
+  ],
+  "repository": {
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.other.tbl",
+          "match": "\\b(task)\\b"
+        },
+        {
+          "name": "keyword.control.tbl",
+          "match": "\\b(if|while|for|return|else|exit|schedule)\\b"
+        },
+        {
+          "name": "comment.line.tbl",
+          "match": "\\//(.*)$"
+        },
+        {
+          "name": "keyword.other.tbl",
+          "match": "@[A-Za-z_0-9]+"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.tbl",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.tbl",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.modifier.tbl",
+          "match": "\\b(var|global|extern)\\b"
+        },
+        {
+          "name": "storage.type.tbl",
+          "match": "\\b&?(struct|[iu](8|16|32|64)|bool|any)\\b"
+        },
+        {
+          "name": "entity.name.type.tbl",
+          "match": "\\b[A-Z]\\w*\\b"
+        }
+      ]
+    },
+    "vars": {
+      "patterns": [
+        {
+          "match": "\\b([A-Za-z_]+[\\w]*)\\b\\((.*)\\)",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.tbl"
+            },
+            "2": {
+              "patterns": [
+                {
+                  "include": "#keywords"
+                },
+                {
+                  "include": "#strings"
+                },
+                {
+                  "include": "#types"
+                },
+                {
+                  "include": "#vars"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "variable.name.tbl",
+          "match": "\\b[A-Za-z_]+[\\w]*\\b"
+        }
+      ]
+    }
+  },
+  "scopeName": "source.tbl"
+}
