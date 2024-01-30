@@ -36,21 +36,23 @@ task sched_exit() {
     TASK_EXITED = true;
 }
 
-task sched_run() {
-   var current: i64 = SCHED.current;
+task sched_run() 
+<current: i64, t: Task, t1: task(&any) -> &any, args: &any>
+{
+   current = SCHED.current;
    if (current == -1) {
     return;
    }
-   var t: Task = (SCHED.tasks)[current];
+   t = (SCHED.tasks)[current];
    //printf("%d\n", t.running);
    if t.running == true {
-        var t1: task(&any) -> &any = t.task_;
-        var args: &any = t.args;
+        t1 = t.task_;
+        args = t.args;
         t1(args);
-        //if TASK_EXITED {
-        // ((SCHED.tasks)[current]).running = false;
-        // TASK_EXITED = false;
-        //}
+        if TASK_EXITED {
+         ((SCHED.tasks)[current]).running = false;
+         TASK_EXITED = false;
+        }
    }
    SCHED.current = SCHED.current + 1;
    if (SCHED.current == SCHED.num_tasks) {

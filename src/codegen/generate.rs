@@ -22,7 +22,7 @@ use crate::parse::{
 };
 
 use super::{
-    context::{CodeGenContext, FunctionContext, GlobalContext, StructContext, Symbol},
+    context::{CodeGenContext, FunctionContext, GlobalContext, Locals, StructContext, Symbol},
     debug_info::DebugInfoGenerator,
     Config,
 };
@@ -113,8 +113,10 @@ impl CodeGen {
                     name,
                     params,
                     returns,
+                    locals,
                     body,
                 } => {
+                    dbg!(locals);
                     let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
                     for (_, ty) in params {
                         sig.params
@@ -157,17 +159,33 @@ impl CodeGen {
                     func_builder.switch_to_block(fn_entry);
                     func_builder.seal_block(fn_entry);
 
-                    for (idx, (arg, type_)) in params.iter().enumerate() {
-                        let ty = self.to_cranelift_type(type_).unwrap();
+                    let locals_size = params.iter().map(|(_, p)| self.type_size(p)).sum::<u32>()
+                        + locals.iter().map(|l| self.type_size(&l.type_)).sum::<u32>();
+                    let data = StackSlotData::new(StackSlotKind::ExplicitSlot, locals_size);
+                    let locals_slot = func_builder.create_sized_stack_slot(data);
+                    {
                         let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
-                        let data = StackSlotData::new(StackSlotKind::ExplicitSlot, ty.bytes());
-                        let slot = func_builder.create_sized_stack_slot(data);
+                        fn_ctx.init_locals(locals_slot);
+                    }
+
+                    for (idx, (arg, type_)) in params.iter().enumerate() {
                         let params = func_builder.block_params(fn_entry);
                         let param = params[idx];
-                        func_builder
-                            .ins()
-                            .stack_store(param, slot, Offset32::new(0));
-                        fn_ctx.declare_var(arg, type_.clone(), slot);
+                        let ty_size = self.type_size(type_);
+                        let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
+                        fn_ctx.define_local(
+                            &mut func_builder,
+                            arg,
+                            type_.clone(),
+                            ty_size,
+                            param,
+                        )?;
+                    }
+
+                    for local in locals {
+                        let ty_size = self.type_size(&local.type_);
+                        let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
+                        fn_ctx.declare_local(&local.name, local.type_.clone(), ty_size)?;
                     }
 
                     for stmt in body {
@@ -479,6 +497,7 @@ impl CodeGen {
                 func_builder.ins().return_(&return_values);
             }
             Statement::Schedule { task, args } => {
+                todo!("Fix this to use the new locals system");
                 let ty_name = format!("__{task}_args");
                 let arg_ty = self.ctx.types.get(&ty_name).unwrap().clone();
                 let data = StackSlotData::new(
@@ -519,22 +538,6 @@ impl CodeGen {
                         ],
                     },
                 )?;
-            }
-            Statement::VarDecl { name, type_, value } => {
-                dbg!(name, type_);
-                let data = StackSlotData::new(StackSlotKind::ExplicitSlot, self.type_size(type_));
-                let slot = func_builder.create_sized_stack_slot(data);
-                let fn_ctx = self
-                    .ctx
-                    .func_by_idx_mut(fn_idx as usize)
-                    .ok_or(miette!("Could not find function with ID {fn_idx}"))?;
-                fn_ctx.declare_var(name, type_.clone(), slot);
-                let addr = func_builder.ins().stack_addr(
-                    self.obj_module.isa().pointer_type(),
-                    slot,
-                    Offset32::new(0),
-                );
-                self.store_expr(func_builder, type_, addr, 0, value)?;
             }
             Statement::Assign { location, value } => {
                 let ctx = self.ctx.func_by_idx(fn_idx as usize);
@@ -667,6 +670,14 @@ impl CodeGen {
                     .resolve_name(ctx, v)
                     .ok_or(miette!("Cannot resolve name `{v}`"))?
                 {
+                    Symbol::Local(var) => {
+                        let offset = ctx.locals().offset_of(&var.name);
+                        Ok(builder.ins().stack_load(
+                            self.to_cranelift_type(&var.type_).unwrap(),
+                            ctx.locals().slot,
+                            Offset32::new(offset as i32),
+                        ))
+                    }
                     Symbol::Variable(var) => Ok(builder.ins().stack_load(
                         self.to_cranelift_type(&var.type_).unwrap(),
                         var.slot,
@@ -830,7 +841,6 @@ impl CodeGen {
                         if l == r {
                             Some(l)
                         } else {
-                            println!("{left:?}, {right:?}");
                             return Err(miette!("Conflicting types `{l:?}` and `{r:?}`"));
                         }
                     }
@@ -909,6 +919,14 @@ impl CodeGen {
                     .resolve_name(ctx, val)
                     .ok_or(miette!("Failed to resolve name `{val}`"))?
                 {
+                    Symbol::Local(var) => {
+                        let var_offset = ctx.locals().offset_of(&var.name);
+                        Ok(builder.ins().stack_load(
+                            member_ty,
+                            ctx.locals().slot,
+                            Offset32::new(var_offset as i32 + offset as i32),
+                        ))
+                    }
                     Symbol::Variable(var) => Ok(builder.ins().stack_load(
                         member_ty,
                         var.slot,
@@ -1005,6 +1023,14 @@ impl CodeGen {
                     .resolve_name(&ctx, v)
                     .ok_or(miette!("Failed to resolve name `{v}`"))?
                 {
+                    Symbol::Local(var) => {
+                        let offset = ctx.locals().offset_of(&var.name);
+                        Ok(builder.ins().stack_addr(
+                            self.obj_module.isa().pointer_type(),
+                            ctx.locals().slot,
+                            Offset32::new(offset as i32),
+                        ))
+                    }
                     Symbol::Variable(var) => Ok(builder.ins().stack_addr(
                         self.obj_module.isa().pointer_type(),
                         var.slot,
@@ -1094,6 +1120,7 @@ impl CodeGen {
                 },
             },
             Expression::Var(v) => self.ctx.resolve_name(ctx, v).map(|r| match r {
+                Symbol::Local(var) => var.type_.clone(),
                 Symbol::Variable(var) => var.type_.clone(),
                 Symbol::Function(fun) => TblType::TaskPtr {
                     params: fun.params.iter().map(|(_, ty)| ty.clone()).collect(),

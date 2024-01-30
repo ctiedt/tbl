@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use cranelift::codegen::ir::StackSlot;
+use cranelift::{
+    codegen::ir::{immediates::Offset32, InstBuilder, StackSlot, Value},
+    frontend::FunctionBuilder,
+};
 use cranelift_module::FuncId;
 
 use crate::parse::{
@@ -55,8 +58,8 @@ impl CodeGenContext {
     }
 
     pub fn resolve_name<'a>(&'a self, ctx: &'a FunctionContext, name: &str) -> Option<Symbol<'a>> {
-        match ctx.vars.get(name) {
-            Some(var) => Some(Symbol::Variable(var)),
+        match ctx.locals.as_ref().unwrap().find(name) {
+            Some(var) => Some(Symbol::Local(var)),
             None => match self.globals.get(name) {
                 Some(global) => Some(Symbol::Global(global)),
                 None => self.functions.get(name).map(Symbol::Function),
@@ -66,6 +69,7 @@ impl CodeGenContext {
 }
 
 pub enum Symbol<'a> {
+    Local(&'a Local),
     Variable(&'a VarInfo),
     Function(&'a FunctionContext),
     Global(&'a GlobalContext),
@@ -91,6 +95,7 @@ pub struct FunctionContext {
     pub params: Vec<(String, TblType)>,
     pub returns: Option<TblType>,
     pub vars: HashMap<String, VarInfo>,
+    pub locals: Option<Locals>,
     pub func_id: FuncId,
     pub is_variadic: bool,
     pub is_external: bool,
@@ -110,6 +115,7 @@ impl FunctionContext {
             params,
             returns,
             vars: HashMap::new(),
+            locals: None,
             func_id: id,
             is_variadic,
             is_external,
@@ -117,9 +123,88 @@ impl FunctionContext {
         }
     }
 
+    pub fn init_locals(&mut self, slot: StackSlot) {
+        self.locals.replace(Locals { slot, vars: vec![] });
+    }
+
     pub fn declare_var(&mut self, name: &str, type_: TblType, slot: StackSlot) -> VarInfo {
         self.vars.insert(name.to_string(), VarInfo { slot, type_ });
         self.vars[name].clone()
+    }
+
+    pub fn locals(&self) -> &Locals {
+        self.locals.as_ref().unwrap()
+    }
+
+    pub fn declare_local(&mut self, name: &str, type_: TblType, size: u32) -> miette::Result<()> {
+        match self.locals.as_mut() {
+            Some(locals) => {
+                let idx = locals.next_idx();
+                locals.vars.push(Local {
+                    name: name.to_string(),
+                    type_,
+                    size,
+                });
+                Ok(())
+            }
+            None => miette::bail!("Tried to insert locals into an external task"),
+        }
+    }
+
+    pub fn define_local(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        name: &str,
+        type_: TblType,
+        size: u32,
+        value: Value,
+    ) -> miette::Result<()> {
+        match self.locals.as_mut() {
+            Some(locals) => {
+                let idx = locals.next_idx();
+                builder
+                    .ins()
+                    .stack_store(value, locals.slot, Offset32::new(idx as i32));
+                locals.vars.push(Local {
+                    name: name.to_string(),
+                    type_,
+                    size,
+                });
+                Ok(())
+            }
+            None => miette::bail!("Tried to insert locals into an external task"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Local {
+    pub name: String,
+    pub type_: TblType,
+    pub size: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct Locals {
+    pub slot: StackSlot,
+    pub vars: Vec<Local>,
+}
+
+impl Locals {
+    fn find(&self, name: &str) -> Option<&Local> {
+        self.vars.iter().find(|v| v.name == name)
+    }
+
+    fn next_idx(&self) -> u32 {
+        self.vars.iter().map(|l| l.size).sum()
+    }
+
+    pub fn offset_of(&self, name: &str) -> u32 {
+        self.vars
+            .iter()
+            .take_while(|l| l.name != name)
+            .map(|l| l.size)
+            .sum()
     }
 }
 

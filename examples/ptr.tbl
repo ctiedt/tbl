@@ -1,8 +1,12 @@
 extern task printf(...);
 
-task main() -> u32 {
-    var x: u64 = 42;
-    var y: &u64 = &x;
+task sched_run() {}
+
+task main() -> u32 
+<x: u32, y: &u32>
+{
+    x = 42;
+    y = &x;
     printf("%p, ", y);
     *y = 1337;
     printf("%d, ", x);

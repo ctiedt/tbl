@@ -153,7 +153,6 @@ fn main() -> miette::Result<()> {
         .unwrap();
 
     let program = parse_program(parsed, &args.preprocessor)?;
-    dbg!(&program);
 
     let mut shared_builder = settings::builder();
     shared_builder.enable("is_pic").into_diagnostic()?;

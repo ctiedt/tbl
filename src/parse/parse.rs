@@ -4,7 +4,7 @@ use pest::iterators::{Pair, Pairs};
 use crate::{parse::types::BinaryOperator, Rule};
 
 use super::types::{
-    Declaration, Expression, ExternTaskParams, Literal, Statement, Type, UnaryOperator,
+    Declaration, Expression, ExternTaskParams, Literal, Local, Statement, Type, UnaryOperator,
 };
 
 pub fn parse_type(tokens: Pair<'_, Rule>) -> miette::Result<Type> {
@@ -102,6 +102,19 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
                 .map(|p| parse_type(p))
                 .collect();
             let params = param_names.zip(param_types?).collect();
+            let local_names = pairs
+                .clone()
+                .find_tagged("local_name")
+                .map(|p| p.as_str().to_string());
+            let local_types: miette::Result<Vec<Type>> = pairs
+                .clone()
+                .find_tagged("local_type")
+                .map(|p| parse_type(p))
+                .collect();
+            let locals: Vec<Local> = local_names
+                .zip(local_types?)
+                .map(|(n, t)| Local { name: n, type_: t })
+                .collect();
             let body: miette::Result<Vec<Statement>> =
                 pairs.find_tagged("body").map(parse_stmt).collect();
             let body = body?;
@@ -111,6 +124,7 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
                 name,
                 params,
                 returns,
+                locals,
                 body,
             })
         }
@@ -165,7 +179,6 @@ pub fn parse_decl(tokens: Pair<'_, Rule>) -> miette::Result<Declaration> {
                 .map(|p| parse_type(p))
                 .collect();
 
-            dbg!(&param_names, &param_types);
             let members = param_names.into_iter().zip(param_types?).collect();
 
             Ok(Declaration::Struct { name, members })
@@ -260,28 +273,6 @@ pub fn parse_stmt(tokens: Pair<'_, Rule>) -> miette::Result<Statement> {
             let value = pair.into_inner().next().map(parse_expr).transpose()?;
             Ok(Statement::Return(value))
         }
-        Some("var_decl") => {
-            let inner = pair.into_inner();
-            let name = inner
-                .find_first_tagged("name")
-                .ok_or(miette!("Variable has no name"))?
-                .as_str()
-                .to_string();
-            let type_ = parse_type(
-                inner
-                    .find_first_tagged("type")
-                    .ok_or(miette!("Variable has no type"))?,
-            )?;
-            let value = parse_expr(
-                inner
-                    .find_first_tagged("value")
-                    .ok_or(miette!("Variable has no value"))?
-                    .into_inner()
-                    .next()
-                    .ok_or(miette!("Variable value should contain a pair"))?,
-            )?;
-            Ok(Statement::VarDecl { name, type_, value })
-        }
         Some("assign") => {
             let inner = pair.into_inner();
             let location = parse_expr(
@@ -313,7 +304,7 @@ pub fn parse_stmt(tokens: Pair<'_, Rule>) -> miette::Result<Statement> {
 
 pub fn parse_expr(tokens: Pair<'_, Rule>) -> miette::Result<Expression> {
     match tokens.as_node_tag() {
-        Some("test") | None => match tokens.as_rule() {
+        Some("test") | Some("local_value") | None => match tokens.as_rule() {
             Rule::equality | Rule::comparison | Rule::term | Rule::factor => {
                 parse_binop(tokens.into_inner())
             }

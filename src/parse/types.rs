@@ -88,6 +88,7 @@ pub enum Declaration {
         name: String,
         params: Vec<(String, Type)>,
         returns: Option<Type>,
+        locals: Vec<Local>,
         body: Vec<Statement>,
     },
     Struct {
@@ -106,6 +107,12 @@ pub enum Declaration {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Local {
+    pub name: String,
+    pub type_: Type,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Statement {
     Conditional {
         test: Expression,
@@ -118,11 +125,6 @@ pub enum Statement {
     Schedule {
         task: String,
         args: Vec<Expression>,
-    },
-    VarDecl {
-        name: String,
-        type_: Type,
-        value: Expression,
     },
     Assign {
         location: Expression,

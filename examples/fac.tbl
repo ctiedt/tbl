@@ -9,9 +9,11 @@ task fac(n: u32) -> u32 {
     return 0;
 }
 
-task main() -> u32 {
-    var n: u32 = 5;
-    var m: u32 = fac(n);
+task main() -> u32 
+<n: u32, m: u32>
+{
+    n = 5;
+    m = fac(n);
     printf("%d\n", m);
     return 0;
 }
