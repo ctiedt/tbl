@@ -22,7 +22,7 @@ use crate::parse::{
 };
 
 use super::{
-    context::{CodeGenContext, FunctionContext, GlobalContext, Locals, StructContext, Symbol},
+    context::{CodeGenContext, FunctionContext, GlobalContext, StructContext, Symbol},
     debug_info::DebugInfoGenerator,
     Config,
 };
@@ -116,7 +116,6 @@ impl CodeGen {
                     locals,
                     body,
                 } => {
-                    dbg!(locals);
                     let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
                     for (_, ty) in params {
                         sig.params
@@ -497,13 +496,14 @@ impl CodeGen {
                 func_builder.ins().return_(&return_values);
             }
             Statement::Schedule { task, args } => {
-                todo!("Fix this to use the new locals system");
+                //todo!("Fix this to use the new locals system");
                 let ty_name = format!("__{task}_args");
                 let arg_ty = self.ctx.types.get(&ty_name).unwrap().clone();
-                let data = StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    self.type_size(&TblType::Named(ty_name.clone())),
-                );
+                let arg_tbl_ty = TblType::Named(ty_name.clone());
+                let ty_size = self.type_size(&arg_tbl_ty);
+                //ctx.declare_local("args", arg_tbl_ty, ty_size)?;
+
+                let data = StackSlotData::new(StackSlotKind::ExplicitSlot, ty_size);
                 let slot = func_builder.create_sized_stack_slot(data);
                 let addr = func_builder.ins().stack_addr(
                     self.obj_module.isa().pointer_type(),
@@ -515,29 +515,28 @@ impl CodeGen {
                     self.store_expr(func_builder, ty, addr, offset, arg)?;
                     offset += self.type_size(ty) as i32;
                 }
-                let ctx = self.ctx.func_by_idx_mut(fn_idx as usize).unwrap();
-                ctx.declare_var(
-                    "args",
-                    TblType::Pointer(Box::new(TblType::Named(ty_name.clone()))),
-                    slot,
-                );
-                self.compile_expr(
-                    func_builder,
-                    None,
-                    &Expression::Call {
-                        task: Box::new(Expression::Var("sched_enqueue".into())),
-                        args: vec![
-                            Expression::Var(format!("__{task}_wrapper")),
-                            Expression::UnaryOperation {
-                                value: Box::new(Expression::Var(String::from("args"))),
-                                operator: UnaryOperator::Reference,
-                            },
-                            Expression::SizeOf {
-                                value: TblType::Named(ty_name),
-                            },
-                        ],
-                    },
-                )?;
+
+                let task_name = format!("__{task}_wrapper");
+                let called_task_ctx = self.ctx.functions.get(&task_name).unwrap();
+                let called_task = self
+                    .obj_module
+                    .declare_func_in_func(called_task_ctx.func_id, func_builder.func);
+                let called_task_addr = func_builder
+                    .ins()
+                    .func_addr(self.obj_module.isa().pointer_type(), called_task);
+
+                let args_size = func_builder
+                    .ins()
+                    .iconst(self.obj_module.isa().pointer_type(), ty_size as i64);
+
+                let sched_enqeue_ctx = self.ctx.functions.get("sched_enqueue").unwrap();
+                let sched_enqueue = self
+                    .obj_module
+                    .declare_func_in_func(sched_enqeue_ctx.func_id, func_builder.func);
+
+                func_builder
+                    .ins()
+                    .call(sched_enqueue, &[called_task_addr, addr, args_size]);
             }
             Statement::Assign { location, value } => {
                 let ctx = self.ctx.func_by_idx(fn_idx as usize);
@@ -678,11 +677,6 @@ impl CodeGen {
                             Offset32::new(offset as i32),
                         ))
                     }
-                    Symbol::Variable(var) => Ok(builder.ins().stack_load(
-                        self.to_cranelift_type(&var.type_).unwrap(),
-                        var.slot,
-                        Offset32::new(0),
-                    )),
                     Symbol::Function(fun) => {
                         let func_id = self
                             .obj_module
@@ -764,16 +758,17 @@ impl CodeGen {
                     None => {
                         let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                         let func_var = ctx
-                            .vars
-                            .get(task_name)
+                            .locals()
+                            .find(task_name)
                             .ok_or(miette!("Could not find task `{task_name}`"))?;
                         let TblType::TaskPtr { params, returns } = &func_var.type_ else {
                             unreachable!()
                         };
+                        let offset = ctx.locals().offset_of(task_name);
                         let callee = builder.ins().stack_load(
                             self.obj_module.isa().pointer_type(),
-                            func_var.slot,
-                            Offset32::new(0),
+                            ctx.locals().slot,
+                            Offset32::new(offset as i32),
                         );
                         let mut arg_vals = vec![];
                         let mut sig = self.obj_module.make_signature();
@@ -927,11 +922,6 @@ impl CodeGen {
                             Offset32::new(var_offset as i32 + offset as i32),
                         ))
                     }
-                    Symbol::Variable(var) => Ok(builder.ins().stack_load(
-                        member_ty,
-                        var.slot,
-                        Offset32::new(offset as i32),
-                    )),
                     Symbol::Function(_) => unimplemented!(),
                     Symbol::Global(global) => {
                         let data = self
@@ -1031,11 +1021,6 @@ impl CodeGen {
                             Offset32::new(offset as i32),
                         ))
                     }
-                    Symbol::Variable(var) => Ok(builder.ins().stack_addr(
-                        self.obj_module.isa().pointer_type(),
-                        var.slot,
-                        Offset32::new(0),
-                    )),
                     Symbol::Function(_) => todo!(),
                     Symbol::Global(global) => {
                         let value = self
@@ -1121,7 +1106,6 @@ impl CodeGen {
             },
             Expression::Var(v) => self.ctx.resolve_name(ctx, v).map(|r| match r {
                 Symbol::Local(var) => var.type_.clone(),
-                Symbol::Variable(var) => var.type_.clone(),
                 Symbol::Function(fun) => TblType::TaskPtr {
                     params: fun.params.iter().map(|(_, ty)| ty.clone()).collect(),
                     returns: fun.returns.clone().map(Box::new),

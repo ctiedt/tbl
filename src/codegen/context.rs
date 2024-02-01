@@ -30,10 +30,6 @@ impl CodeGenContext {
         &self.functions[&self.func_indices[idx]]
     }
 
-    pub fn func_by_idx_mut(&mut self, idx: usize) -> Option<&mut FunctionContext> {
-        self.functions.get_mut(&self.func_indices[idx])
-    }
-
     pub fn insert_type(&mut self, name: String, type_: StructContext) {
         self.types.insert(name, type_);
     }
@@ -70,7 +66,6 @@ impl CodeGenContext {
 
 pub enum Symbol<'a> {
     Local(&'a Local),
-    Variable(&'a VarInfo),
     Function(&'a FunctionContext),
     Global(&'a GlobalContext),
 }
@@ -94,7 +89,6 @@ impl StructContext {
 pub struct FunctionContext {
     pub params: Vec<(String, TblType)>,
     pub returns: Option<TblType>,
-    pub vars: HashMap<String, VarInfo>,
     pub locals: Option<Locals>,
     pub func_id: FuncId,
     pub is_variadic: bool,
@@ -114,7 +108,6 @@ impl FunctionContext {
         Self {
             params,
             returns,
-            vars: HashMap::new(),
             locals: None,
             func_id: id,
             is_variadic,
@@ -127,11 +120,6 @@ impl FunctionContext {
         self.locals.replace(Locals { slot, vars: vec![] });
     }
 
-    pub fn declare_var(&mut self, name: &str, type_: TblType, slot: StackSlot) -> VarInfo {
-        self.vars.insert(name.to_string(), VarInfo { slot, type_ });
-        self.vars[name].clone()
-    }
-
     pub fn locals(&self) -> &Locals {
         self.locals.as_ref().unwrap()
     }
@@ -139,7 +127,6 @@ impl FunctionContext {
     pub fn declare_local(&mut self, name: &str, type_: TblType, size: u32) -> miette::Result<()> {
         match self.locals.as_mut() {
             Some(locals) => {
-                let idx = locals.next_idx();
                 locals.vars.push(Local {
                     name: name.to_string(),
                     type_,
@@ -191,7 +178,7 @@ pub struct Locals {
 }
 
 impl Locals {
-    fn find(&self, name: &str) -> Option<&Local> {
+    pub fn find(&self, name: &str) -> Option<&Local> {
         self.vars.iter().find(|v| v.name == name)
     }
 

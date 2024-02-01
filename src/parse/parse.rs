@@ -12,7 +12,6 @@ pub fn parse_type(tokens: Pair<'_, Rule>) -> miette::Result<Type> {
         .into_inner()
         .next()
         .ok_or(miette!("Declaration should contain one inner pair"))?;
-    println!("{} {:?}", pair.as_str(), pair.as_rule());
     match pair.as_rule() {
         Rule::bool => Ok(Type::Bool),
         Rule::integer => {
@@ -236,10 +235,28 @@ pub fn parse_stmt(tokens: Pair<'_, Rule>) -> miette::Result<Statement> {
                     .find_first_tagged("test")
                     .ok_or(miette!("Condition has no test"))?,
             )?;
-            let then: miette::Result<Vec<Statement>> =
-                pairs.clone().find_tagged("then").map(parse_stmt).collect();
-            let else_: miette::Result<Vec<Statement>> =
-                pairs.clone().find_tagged("else").map(parse_stmt).collect();
+            let then: miette::Result<Vec<Statement>> = pairs
+                .clone()
+                .filter_map(|r| {
+                    if matches!(r.as_rule(), Rule::then_clause) {
+                        let inner = r.into_inner().next().unwrap();
+                        Some(parse_stmt(inner))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let else_: miette::Result<Vec<Statement>> = pairs
+                .clone()
+                .filter_map(|r| {
+                    if matches!(r.as_rule(), Rule::else_clause) {
+                        let inner = r.into_inner().next().unwrap();
+                        Some(parse_stmt(inner))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             Ok(Statement::Conditional {
                 test,
                 then: then?,

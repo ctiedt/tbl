@@ -39,26 +39,26 @@ task sched_exit() {
 task sched_run() 
 <current: i64, t: Task, t1: task(&any) -> &any, args: &any>
 {
-   current = SCHED.current;
-   if (current == -1) {
+    current = SCHED.current;
+    if current == -1 {
+     return;
+    }
+    t = (SCHED.tasks)[current];
+    //printf("%p\n", t.task_);
+    if t.running {
+         t1 = t.task_;
+         args = t.args;
+         t1(args);
+         if TASK_EXITED {
+          ((SCHED.tasks)[current]).running = false;
+          TASK_EXITED = false;
+         }
+    }
+    SCHED.current = current + 1;
+    if (SCHED.current == SCHED.num_tasks) {
+         SCHED.current = 0;
+    }
+    tbl_sleep(100);
+    sched_run();
     return;
-   }
-   t = (SCHED.tasks)[current];
-   //printf("%d\n", t.running);
-   if t.running == true {
-        t1 = t.task_;
-        args = t.args;
-        t1(args);
-        if TASK_EXITED {
-         ((SCHED.tasks)[current]).running = false;
-         TASK_EXITED = false;
-        }
-   }
-   SCHED.current = SCHED.current + 1;
-   if (SCHED.current == SCHED.num_tasks) {
-        SCHED.current = 0;
-   }
-   tbl_sleep(100);
-   sched_run();
-   return;
 }

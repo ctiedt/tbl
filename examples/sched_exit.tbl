@@ -15,8 +15,10 @@ task bar(n: &u32) {
     return;
 }
 
-task main() -> i32 {
-    var n: u32 = 0;
+task main() -> i32
+<n: u32>
+{
+    n = 0;
     schedule foo(&n);
     schedule bar(&n);
     return 0;

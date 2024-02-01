@@ -16,6 +16,7 @@ task main() -> i32
 <n: u32>
 {
     n = 0;
+    //printf("foo: %p\n", foo);
     schedule foo(&n);
     schedule bar(&n);
     // sched_run();

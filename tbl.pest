@@ -37,7 +37,9 @@ exit = { "exit" }
 return = { "return" ~ expression? }
 assign = { #location = expression ~ "=" ~ #value = expression}
 
-conditional = { "if" ~ (#test = expression) ~ "{" ~ #then = statement* ~ "}" ~ ("else" ~ (("{" ~ #else = statement* ~ "}") | conditional))? }
+conditional = { "if" ~ (#test = expression) ~ "{" ~ (then_clause)* ~ "}" ~ ("else" ~ (("{" ~ else_clause* ~ "}") | conditional))? }
+then_clause = { statement }
+else_clause = { statement }
 
 expression = { equality }
 
