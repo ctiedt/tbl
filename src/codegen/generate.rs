@@ -13,12 +13,15 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use miette::{miette, IntoDiagnostic};
 use tracing::info;
 
-use crate::parse::{
-    types::{
-        BinaryOperator, Declaration, Expression, ExternTaskParams, Literal, Program, Statement,
-        Type as TblType, UnaryOperator,
+use crate::{
+    codegen::context::StructMember,
+    parse::{
+        types::{
+            BinaryOperator, Declaration, Expression, ExternTaskParams, Literal, Program, Statement,
+            Type as TblType, UnaryOperator,
+        },
+        Location,
     },
-    Location,
 };
 
 use super::{
@@ -217,12 +220,12 @@ impl CodeGen {
                     let fn_ctx = self.ctx.functions.get(name).unwrap().clone();
                     self.build_wrapper(name, fn_ctx)?;
                 }
-                Declaration::Struct { name, members } => self.ctx.insert_type(
-                    name.clone(),
-                    StructContext {
-                        members: members.clone(),
-                    },
+                Declaration::Struct { name, members } => self.ctx.create_struct_type(
+                    name,
+                    members,
+                    self.obj_module.isa().pointer_bytes() as usize,
                 ),
+
                 Declaration::Global { name, type_, value } => {
                     let data_id = self
                         .obj_module
@@ -269,12 +272,12 @@ impl CodeGen {
 
     fn build_wrapper(&mut self, name: &str, fn_ctx: FunctionContext) -> miette::Result<()> {
         let params_name = format!("__{name}_args");
-        self.ctx.insert_type(
-            params_name.clone(),
-            StructContext {
-                members: fn_ctx.params.clone(),
-            },
+        self.ctx.create_struct_type(
+            &params_name,
+            &fn_ctx.params,
+            self.obj_module.isa().pointer_bytes() as usize,
         );
+
         let params_ty = self.ctx.types[&params_name].clone();
 
         let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
@@ -324,15 +327,18 @@ impl CodeGen {
             .obj_module
             .declare_func_in_func(fn_ctx.func_id, func_builder.func);
         let mut args = vec![];
-        let mut offset = 0;
-        for (_, ty) in &params_ty.members {
+        for StructMember {
+            offset,
+            name,
+            type_,
+        } in &params_ty.members
+        {
             let arg = func_builder.ins().load(
-                self.to_cranelift_type(ty).unwrap(),
+                self.to_cranelift_type(type_).unwrap(),
                 MemFlags::new(),
                 param,
-                Offset32::new(offset),
+                Offset32::new(*offset as i32),
             );
-            offset += self.type_size(ty) as i32;
             args.push(arg);
         }
         func_builder.ins().call(wrapped_func, &args);
@@ -361,7 +367,8 @@ impl CodeGen {
     }
 
     fn build_start(&mut self) -> miette::Result<()> {
-        let sig = Signature::new(self.obj_module.isa().default_call_conv());
+        let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
+        sig.returns.push(AbiParam::new(types::I32));
         let func_id = self
             .obj_module
             .declare_function("main", cranelift_module::Linkage::Export, &sig)
@@ -409,10 +416,15 @@ impl CodeGen {
             .obj_module
             .declare_func_in_func(sched_run_id, func_builder.func);
 
-        func_builder.ins().call(main_ref, &[]);
+        let main_inst = func_builder.ins().call(main_ref, &[]);
+        let main_ret = func_builder
+            .inst_results(main_inst)
+            .first()
+            .copied()
+            .unwrap_or_else(|| func_builder.ins().iconst(types::I32, 0));
         func_builder.ins().call(sched_run, &[]);
 
-        func_builder.ins().return_(&[]);
+        func_builder.ins().return_(&[main_ret]);
 
         info!("{}", func.display());
 
@@ -496,12 +508,10 @@ impl CodeGen {
                 func_builder.ins().return_(&return_values);
             }
             Statement::Schedule { task, args } => {
-                //todo!("Fix this to use the new locals system");
                 let ty_name = format!("__{task}_args");
                 let arg_ty = self.ctx.types.get(&ty_name).unwrap().clone();
                 let arg_tbl_ty = TblType::Named(ty_name.clone());
                 let ty_size = self.type_size(&arg_tbl_ty);
-                //ctx.declare_local("args", arg_tbl_ty, ty_size)?;
 
                 let data = StackSlotData::new(StackSlotKind::ExplicitSlot, ty_size);
                 let slot = func_builder.create_sized_stack_slot(data);
@@ -510,10 +520,17 @@ impl CodeGen {
                     slot,
                     Offset32::new(0),
                 );
-                let mut offset = 0;
-                for (arg, (_, ty)) in args.iter().zip(&arg_ty.members) {
-                    self.store_expr(func_builder, ty, addr, offset, arg)?;
-                    offset += self.type_size(ty) as i32;
+
+                for (
+                    arg,
+                    StructMember {
+                        offset,
+                        name: _,
+                        type_,
+                    },
+                ) in args.iter().zip(&arg_ty.members)
+                {
+                    self.store_expr(func_builder, type_, addr, *offset as i32, arg)?;
                 }
 
                 let task_name = format!("__{task}_wrapper");
@@ -560,17 +577,15 @@ impl CodeGen {
             TblType::Named(name) => match value {
                 Expression::Literal(Literal::Struct(members)) => {
                     let struct_ty = self.ctx.types[name].clone();
-                    let mut current_offset = 0;
-                    for (idx, (_, value)) in members.iter().enumerate() {
-                        let member_ty: TblType = struct_ty.member_ty(idx).clone();
+
+                    for (member, (_, val)) in struct_ty.members.iter().zip(members) {
                         self.store_expr(
                             func_builder,
-                            &member_ty,
+                            &member.type_,
                             addr,
-                            offset + current_offset,
-                            value,
+                            offset + member.offset as i32,
+                            val,
                         )?;
-                        current_offset += self.type_size(&member_ty) as i32;
                     }
                 }
                 expr => {
@@ -892,17 +907,22 @@ impl CodeGen {
             Expression::StructAccess { value, member } => {
                 let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                 let ty_name = self.type_of(ctx, value).unwrap().name();
-                let ty = &self.ctx.types[&ty_name].members;
+                let ty = &self.ctx.types[&ty_name];
 
-                let mut offset = 0;
-                let mut idx = 0;
-                while &ty[idx].0 != member {
-                    offset += self.type_size(&ty[idx].1);
-                    idx += 1;
-                }
+                let offset = ty
+                    .members
+                    .iter()
+                    .find_map(|m| {
+                        if &m.name == member {
+                            Some(m.offset)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap() as i32;
 
                 let member_ty = self
-                    .to_cranelift_type(&ty[idx].1)
+                    .to_cranelift_type(ty.member_ty(ty.member_idx(member)))
                     .ok_or(miette!("Cannot convert TBL type to cranelift type"))?;
 
                 let Expression::Var(ref val) = **value else {
@@ -919,7 +939,7 @@ impl CodeGen {
                         Ok(builder.ins().stack_load(
                             member_ty,
                             ctx.locals().slot,
-                            Offset32::new(var_offset as i32 + offset as i32),
+                            Offset32::new(var_offset as i32 + offset),
                         ))
                     }
                     Symbol::Function(_) => unimplemented!(),
@@ -934,7 +954,7 @@ impl CodeGen {
                             member_ty,
                             MemFlags::new(),
                             addr,
-                            Offset32::new(offset as i32),
+                            Offset32::new(offset),
                         ))
                     }
                 }
@@ -1036,12 +1056,16 @@ impl CodeGen {
                 let ty = self.type_of(&ctx, value).unwrap();
                 let ty_members = &self.ctx.types[&ty.name()].members;
 
-                let mut offset = 0;
-                let mut idx = 0;
-                while &ty_members[idx].0 != member {
-                    offset += self.type_size(&ty_members[idx].1);
-                    idx += 1;
-                }
+                let offset = ty_members
+                    .iter()
+                    .find_map(|m| {
+                        if &m.name == member {
+                            Some(m.offset)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap() as i32;
 
                 let lhs = self.compile_lvalue(builder, value)?;
 
@@ -1179,10 +1203,10 @@ impl CodeGen {
     fn type_size(&self, type_: &TblType) -> u32 {
         match type_ {
             TblType::Array { item, length } => self.type_size(item) * (*length as u32),
-            TblType::Named(name) => {
-                let ty = &self.ctx.types[name];
-                ty.members.iter().map(|(_, t)| self.type_size(t)).sum()
-            }
+            TblType::Named(name) => self
+                .ctx
+                .struct_size(name, self.obj_module.isa().pointer_bytes() as usize)
+                as u32,
             t => self.to_cranelift_type(t).unwrap().bytes(),
         }
     }

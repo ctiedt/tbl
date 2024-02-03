@@ -1,4 +1,3 @@
-#![feature(backtrace_frames)]
 use std::{backtrace::Backtrace, panic::PanicInfo, path::PathBuf};
 
 use clap::Parser as ArgParser;

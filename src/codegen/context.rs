@@ -30,23 +30,19 @@ impl CodeGenContext {
         &self.functions[&self.func_indices[idx]]
     }
 
-    pub fn insert_type(&mut self, name: String, type_: StructContext) {
-        self.types.insert(name, type_);
-    }
-
-    pub fn type_size(&self, ty: &TblType, ptr_size: u8) -> u8 {
+    pub fn type_size(&self, ty: &TblType, ptr_size: usize) -> usize {
         match ty {
             TblType::Any => 0,
             TblType::Bool => 1,
-            TblType::Integer { width, .. } => width / 8,
-            TblType::Array { item, length } => self.type_size(item, ptr_size) * (*length as u8),
+            TblType::Integer { width, .. } => (width / 8) as usize,
+            TblType::Array { item, length } => self.type_size(item, ptr_size) * (*length as usize),
             TblType::Pointer(_) => ptr_size,
             TblType::Named(name) => {
                 let struct_ty = &self.types[name];
                 struct_ty
                     .members
                     .iter()
-                    .map(|(_, t)| self.type_size(t, ptr_size))
+                    .map(|m| self.type_size(&m.type_, ptr_size))
                     .sum()
             }
             TblType::TaskPtr { .. } => ptr_size,
@@ -62,6 +58,52 @@ impl CodeGenContext {
             },
         }
     }
+
+    pub fn create_struct_type(
+        &mut self,
+        ty_name: &str,
+        members: &[(String, TblType)],
+        ptr_size: usize,
+    ) {
+        fn padding_needed_for(offset: usize, alignment: usize) -> usize {
+            let misalignment = offset % alignment;
+            if misalignment > 0 {
+                // round up to next multiple of `alignment`
+                alignment - misalignment
+            } else {
+                // already a multiple of `alignment`
+                0
+            }
+        }
+
+        let mut layout = vec![];
+        if let Some(align) = members
+            .iter()
+            .map(|(_, m)| self.type_size(m, ptr_size))
+            .max()
+        {
+            let mut offset = 0;
+            for (name, member) in members {
+                let size = self.type_size(member, ptr_size);
+                offset += padding_needed_for(offset, align);
+                layout.push(StructMember {
+                    offset,
+                    name: name.clone(),
+                    type_: member.clone(),
+                });
+                offset += size;
+            }
+        }
+
+        self.types
+            .insert(ty_name.to_string(), StructContext { members: layout });
+    }
+
+    pub fn struct_size(&self, ty: &str, ptr_size: usize) -> usize {
+        let ty_ctx = &self.types[ty];
+        let last = ty_ctx.members.last().unwrap();
+        last.offset + self.type_size(&last.type_, ptr_size)
+    }
 }
 
 pub enum Symbol<'a> {
@@ -72,16 +114,23 @@ pub enum Symbol<'a> {
 
 #[derive(Clone, Debug)]
 pub struct StructContext {
-    pub members: Vec<(String, TblType)>,
+    pub members: Vec<StructMember>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StructMember {
+    pub offset: usize,
+    pub name: String,
+    pub type_: TblType,
 }
 
 impl StructContext {
     pub fn member_ty(&self, idx: usize) -> &TblType {
-        &self.members[idx].1
+        &self.members[idx].type_
     }
 
     pub fn member_idx(&self, member: &str) -> usize {
-        self.members.iter().position(|(m, _)| m == member).unwrap()
+        self.members.iter().position(|m| m.name == member).unwrap()
     }
 }
 
@@ -193,12 +242,6 @@ impl Locals {
             .map(|l| l.size)
             .sum()
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct VarInfo {
-    pub slot: StackSlot,
-    pub type_: TblType,
 }
 
 #[derive(Debug, Clone)]

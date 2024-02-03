@@ -236,7 +236,7 @@ impl DebugInfoGenerator {
                 AttributeValue::StringRef(self.dwarf.strings.add(name.as_str())),
             );
 
-            param_offset += ctx.type_size(ty, self.dwarf.unit.address_size());
+            param_offset += ctx.type_size(ty, self.dwarf.unit.address_size() as usize) as u8;
         }
 
         if func.is_variadic {
