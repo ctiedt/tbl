@@ -25,7 +25,7 @@ use crate::{
 };
 
 use super::{
-    context::{CodeGenContext, FunctionContext, GlobalContext, StructContext, Symbol},
+    context::{CodeGenContext, FunctionContext, GlobalContext, Symbol},
     debug_info::DebugInfoGenerator,
     Config,
 };
@@ -329,7 +329,7 @@ impl CodeGen {
         let mut args = vec![];
         for StructMember {
             offset,
-            name,
+            name: _,
             type_,
         } in &params_ty.members
         {
@@ -578,13 +578,16 @@ impl CodeGen {
                 Expression::Literal(Literal::Struct(members)) => {
                     let struct_ty = self.ctx.types[name].clone();
 
-                    for (member, (_, val)) in struct_ty.members.iter().zip(members) {
+                    for (member, expr) in members {
+                        let member_idx = struct_ty.member_idx(member);
+                        let member_offset = struct_ty.members[member_idx].offset;
+                        let member_ty = &struct_ty.members[member_idx].type_;
                         self.store_expr(
                             func_builder,
-                            &member.type_,
+                            member_ty,
                             addr,
-                            offset + member.offset as i32,
-                            val,
+                            offset + member_offset as i32,
+                            expr,
                         )?;
                     }
                 }
@@ -1203,10 +1206,7 @@ impl CodeGen {
     fn type_size(&self, type_: &TblType) -> u32 {
         match type_ {
             TblType::Array { item, length } => self.type_size(item) * (*length as u32),
-            TblType::Named(name) => self
-                .ctx
-                .struct_size(name, self.obj_module.isa().pointer_bytes() as usize)
-                as u32,
+            TblType::Named(name) => self.ctx.types[name].size as u32,
             t => self.to_cranelift_type(t).unwrap().bytes(),
         }
     }

@@ -77,26 +77,34 @@ impl CodeGenContext {
         }
 
         let mut layout = vec![];
+        let mut offset = 0;
+        for (name, member) in members {
+            let size = self.type_size(member, ptr_size);
+            offset += padding_needed_for(offset, size.next_power_of_two());
+            layout.push(StructMember {
+                offset,
+                name: name.clone(),
+                type_: member.clone(),
+            });
+            offset += size;
+        }
+
+        let mut size = offset;
         if let Some(align) = members
             .iter()
             .map(|(_, m)| self.type_size(m, ptr_size))
             .max()
         {
-            let mut offset = 0;
-            for (name, member) in members {
-                let size = self.type_size(member, ptr_size);
-                offset += padding_needed_for(offset, align);
-                layout.push(StructMember {
-                    offset,
-                    name: name.clone(),
-                    type_: member.clone(),
-                });
-                offset += size;
-            }
+            size += padding_needed_for(size, align);
         }
 
-        self.types
-            .insert(ty_name.to_string(), StructContext { members: layout });
+        self.types.insert(
+            ty_name.to_string(),
+            StructContext {
+                size,
+                members: layout,
+            },
+        );
     }
 
     pub fn struct_size(&self, ty: &str, ptr_size: usize) -> usize {
@@ -114,6 +122,7 @@ pub enum Symbol<'a> {
 
 #[derive(Clone, Debug)]
 pub struct StructContext {
+    pub size: usize,
     pub members: Vec<StructMember>,
 }
 
