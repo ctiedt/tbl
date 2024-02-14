@@ -210,9 +210,9 @@ impl DebugInfoGenerator {
         );
 
         if let Some(ref ty) = func.returns {
-            let prim_ty = self.type_defs[&ty.name()];
-
-            die.set(DW_AT_type, AttributeValue::UnitRef(prim_ty));
+            if let Some(prim_ty) = self.type_defs.get(&ty.name()) {
+                die.set(DW_AT_type, AttributeValue::UnitRef(*prim_ty));
+            }
         }
 
         let mut param_offset = 0;

@@ -1,0 +1,25 @@
+@using("lib/std.tbl");
+@using("lib/socket.tbl");
+
+task receive(sock: u32)
+<status: u32, buf: [u8; 64]>
+{
+    status = recv(sock, buf as &u8, 64, 0);
+    if (status == 0)
+    {
+        printf("Failed to receive data\n");
+        exit;
+    }
+    printf("%s", buf as &u8);
+}
+
+task main()
+<sock: u32, s_addr: sockaddr_in>
+{
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    s_addr.sin_family = AF_INET;
+    (s_addr.sin_addr).s_addr = INADDR_ANY;
+    s_addr.sin_port = htons(8080);
+    bind(sock, &s_addr, #sockaddr_in);
+    schedule receive(sock);
+}
