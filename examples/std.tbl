@@ -1,6 +1,7 @@
 extern task memcpy(dest: &any, src: &any, n: u64);
 extern task printf(...);
 extern task putchar(c: u32);
+extern task malloc(size: u64) -> &any;
 @cfg_platform("nt", "extern task Sleep(time: u32);");
 @cfg_platform("posix", "extern task usleep(time: u32);");
 
@@ -22,9 +23,13 @@ struct Scheduler {
 global SCHED: Scheduler = {tasks: [], num_tasks: 0, current: -1};
 global TASK_EXITED: bool = false;
 
-task sched_enqueue(task_: task(&any) -> &any, args: &any, arg_size: u64) {
-    ((SCHED.tasks)[SCHED.num_tasks]).task_ = task_; //= {task_: task_, args: 0, running: true};
-    memcpy(&(((SCHED.tasks)[SCHED.num_tasks]).args), args, arg_size);
+task sched_enqueue(task_: task(&any) -> &any, args: &any, arg_size: u64)
+<arg_ptr: &any>
+{
+    arg_ptr = malloc(arg_size);
+    ((SCHED.tasks)[SCHED.num_tasks]).task_ = task_;
+    memcpy(arg_ptr, args, arg_size);
+    ((SCHED.tasks)[SCHED.num_tasks]).args = arg_ptr;
     ((SCHED.tasks)[SCHED.num_tasks]).running = true;
     SCHED.num_tasks = SCHED.num_tasks + 1;
     if (SCHED.current == -1) {

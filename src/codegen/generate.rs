@@ -316,12 +316,6 @@ impl CodeGen {
         func_builder.seal_block(fn_entry);
 
         let param = func_builder.block_params(fn_entry)[0];
-        let param = func_builder.ins().load(
-            self.obj_module.isa().pointer_type(),
-            MemFlags::new(),
-            param,
-            Offset32::new(0),
-        );
 
         let wrapped_func = self
             .obj_module
@@ -986,6 +980,9 @@ impl CodeGen {
                                 .ins()
                                 .ireduce(self.to_cranelift_type(to).unwrap(), val))
                         }
+                    }
+                    (TblType::Array { .. }, TblType::Pointer(_)) => {
+                        self.compile_lvalue(builder, value)
                     }
                     _ => unimplemented!(),
                 }

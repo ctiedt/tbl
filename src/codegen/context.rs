@@ -106,12 +106,6 @@ impl CodeGenContext {
             },
         );
     }
-
-    pub fn struct_size(&self, ty: &str, ptr_size: usize) -> usize {
-        let ty_ctx = &self.types[ty];
-        let last = ty_ctx.members.last().unwrap();
-        last.offset + self.type_size(&last.type_, ptr_size)
-    }
 }
 
 pub enum Symbol<'a> {

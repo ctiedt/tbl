@@ -1,5 +1,7 @@
 @using("examples/std.tbl");
 
+global n: u32 = 42;
+
 task foo(n: &u32) {
     printf("Hello, foo %d\n", *n);
     *n = *n + 1;
@@ -13,12 +15,8 @@ task bar(n: &u32) {
 }
 
 task main() -> i32 
-<n: u32>
 {
-    n = 0;
-    //printf("foo: %p\n", foo);
     schedule foo(&n);
     schedule bar(&n);
-    // sched_run();
     return 0;
 }

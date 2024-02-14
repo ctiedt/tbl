@@ -34,6 +34,9 @@ struct Args {
     #[arg(short, long, default_value = "preprocess.py")]
     /// The preprocessor implementation to use
     preprocessor: String,
+    /// Object files to link with
+    #[arg(short)]
+    linked_objects: Vec<String>,
     /// File to compile
     file: PathBuf,
 }
@@ -54,7 +57,11 @@ fn host_target() -> TargetPlatform {
     }
 }
 
-fn link(file: &str, target: TargetPlatform) -> miette::Result<()> {
+fn link<S: AsRef<str>>(
+    file: &str,
+    target: TargetPlatform,
+    linked_objects: &[S],
+) -> miette::Result<()> {
     let elf_name = file.trim_end_matches(".tbl");
     let obj_name = format!("{elf_name}.o");
     match target {
@@ -75,23 +82,25 @@ fn link(file: &str, target: TargetPlatform) -> miette::Result<()> {
                 .into_diagnostic()?;
         }
         TargetPlatform::Linux => {
+            let mut args = vec![
+                "-o",
+                elf_name,
+                "-L/usr/lib",
+                "-L/lib",
+                "-L/lib/x86_64-linux-gnu",
+                //"-e",
+                //"_tbl_start",
+                "-dynamic-linker",
+                "/lib64/ld-linux-x86-64.so.2",
+                "-l:crt1.o",
+                "-l:crti.o",
+                "-lc",
+                &obj_name,
+                "-l:crtn.o",
+            ];
+            args.extend(linked_objects.iter().map(|f| f.as_ref()));
             std::process::Command::new("ld.lld")
-                .args([
-                    "-o",
-                    elf_name,
-                    "-L/usr/lib",
-                    "-L/lib",
-                    "-L/lib/x86_64-linux-gnu",
-                    //"-e",
-                    //"_tbl_start",
-                    "-dynamic-linker",
-                    "/lib64/ld-linux-x86-64.so.2",
-                    "-l:crt1.o",
-                    "-l:crti.o",
-                    "-lc",
-                    &obj_name,
-                    "-l:crtn.o",
-                ])
+                .args(args)
                 .spawn()
                 .into_diagnostic()?
                 .wait()
@@ -177,7 +186,7 @@ fn main() -> miette::Result<()> {
     codegen.compile(program)?;
     if !args.compile_only {
         let link_target = host_target();
-        link(&mod_name, link_target)?;
+        link(&mod_name, link_target, args.linked_objects.as_slice())?;
     }
     Ok(())
 }
