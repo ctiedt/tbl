@@ -13,16 +13,15 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use miette::{miette, IntoDiagnostic};
 use tracing::info;
 
-use crate::{
-    codegen::context::StructMember,
-    parse::{
-        types::{
-            BinaryOperator, Declaration, Expression, ExternTaskParams, Literal, Program, Statement,
-            Type as TblType, UnaryOperator,
-        },
-        Location,
+use tbl_parser::{
+    types::{
+        BinaryOperator, Declaration, Expression, ExternTaskParams, Literal, Program, Statement,
+        Type as TblType, UnaryOperator,
     },
+    Location,
 };
+
+use crate::codegen::context::StructMember;
 
 use super::{
     context::{CodeGenContext, FunctionContext, GlobalContext, Symbol},

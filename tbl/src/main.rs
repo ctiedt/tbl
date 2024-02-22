@@ -8,19 +8,13 @@ use cranelift::prelude::{
     Configurable,
 };
 use miette::IntoDiagnostic;
-use pest::Parser;
-use pest_derive::Parser;
+
 use tracing::error;
 use tracing_subscriber::FmtSubscriber;
 
-use parse::parse_program;
+use tbl_parser::parse;
 
 mod codegen;
-mod parse;
-
-#[derive(Parser)]
-#[grammar = "tbl.pest"]
-struct TblParser;
 
 #[derive(ArgParser)]
 #[command(author, version, about)]
@@ -95,6 +89,7 @@ fn link<S: AsRef<str>>(
                 "-l:crt1.o",
                 "-l:crti.o",
                 "-lc",
+                "-lreadline",
                 &obj_name,
                 "-l:crtn.o",
             ];
@@ -155,12 +150,8 @@ fn main() -> miette::Result<()> {
         .into_diagnostic()?;
 
     let source_file = std::fs::read_to_string(&args.file).into_diagnostic()?;
-    let parsed = TblParser::parse(Rule::program, &source_file)
-        .into_diagnostic()?
-        .next()
-        .unwrap();
 
-    let program = parse_program(parsed, &args.preprocessor)?;
+    let program = parse(&source_file, &args.preprocessor)?;
 
     let mut shared_builder = settings::builder();
     shared_builder.enable("is_pic").into_diagnostic()?;
