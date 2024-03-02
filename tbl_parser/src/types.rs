@@ -182,48 +182,12 @@ pub enum BinaryOperator {
     Divide,
 }
 
-impl FromStr for BinaryOperator {
-    type Err = ParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "==" => Ok(BinaryOperator::Equal),
-            "!=" => Ok(BinaryOperator::Unequal),
-            ">" => Ok(BinaryOperator::GreaterThan),
-            ">=" => Ok(BinaryOperator::GreaterOrEqual),
-            "<" => Ok(BinaryOperator::LessThan),
-            "<=" => Ok(BinaryOperator::LessOrEqual),
-            "&&" => Ok(BinaryOperator::And),
-            "||" => Ok(BinaryOperator::Or),
-            "+" => Ok(BinaryOperator::Add),
-            "-" => Ok(BinaryOperator::Subtract),
-            "*" => Ok(BinaryOperator::Multiply),
-            "/" => Ok(BinaryOperator::Divide),
-            other => Err(ParseError::UnknownOperator(other.into())),
-        }
-    }
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum UnaryOperator {
     Dereference,
     Not,
     Minus,
     Reference,
-}
-
-impl FromStr for UnaryOperator {
-    type Err = ParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "*" => Ok(UnaryOperator::Dereference),
-            "!" => Ok(UnaryOperator::Not),
-            "-" => Ok(UnaryOperator::Minus),
-            "&" => Ok(UnaryOperator::Reference),
-            other => Err(ParseError::UnknownOperator(other.into())),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
