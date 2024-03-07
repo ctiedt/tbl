@@ -1,4 +1,5 @@
-use crate::Span;
+use crate::{Span, Token};
+use std::num::ParseIntError;
 use thiserror::Error;
 
 #[derive(Debug)]
@@ -25,12 +26,24 @@ pub enum ParseErrorKind {
     NoMoreTokens,
     #[error("malformed task parameters")]
     BadParams,
+    #[error("malformed type name")]
+    BadType,
+    #[error("expected token `{0}`")]
+    ExpectedToken(Token<'static>),
+    #[error("expected expression")]
+    ExpectedExpression,
+    #[error("bad integer value")]
+    ParseIntError(#[from] ParseIntError),
 }
 
 pub type ParseResult<T> = Result<Option<T>, ParseError>;
 
 pub trait ParseResultExt {
     fn error(self, kind: ParseErrorKind) -> Self;
+
+    fn expected_expr(self) -> Self;
+
+    fn expect_token(self, t: Token<'static>) -> Self;
 }
 
 impl<T> ParseResultExt for ParseResult<T> {
@@ -38,6 +51,20 @@ impl<T> ParseResultExt for ParseResult<T> {
         match self {
             Ok(v) => Ok(v),
             Err(e) => Err(ParseError::new(e.span, kind)),
+        }
+    }
+
+    fn expected_expr(self) -> Self {
+        match self {
+            Ok(v) => Ok(v),
+            Err(e) => Err(ParseError::new(e.span, ParseErrorKind::ExpectedExpression)),
+        }
+    }
+
+    fn expect_token(self, t: Token<'static>) -> Self {
+        match self {
+            Ok(v) => Ok(v),
+            Err(e) => Err(ParseError::new(e.span, ParseErrorKind::ExpectedToken(t))),
         }
     }
 }

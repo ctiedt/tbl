@@ -3,7 +3,7 @@ mod pattern;
 mod token;
 pub mod types;
 
-use std::ops::Range;
+use std::{io::SeekFrom, ops::Range};
 
 use crate::types::Statement;
 use ariadne::{sources, Label, Report};
@@ -74,10 +74,38 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn accept_sequence(
+        &mut self,
+        p: &[impl Pattern<Token<'a>> + Copy],
+    ) -> ParseResult<Vec<Token<'a>>> {
+        let mut res = vec![];
+        let mut diff = 0;
+        for pat in p {
+            match self.accept(*pat) {
+                Ok(Some(v)) => {
+                    res.push(v);
+                    diff += 1;
+                }
+                Ok(None) => {
+                    self.cursor -= diff;
+                    return Ok(None);
+                }
+                Err(e) => {
+                    self.cursor -= diff;
+                    return Err(e);
+                }
+            }
+        }
+        Ok(Some(res))
+    }
+
     fn require(&mut self, p: impl Pattern<Token<'a>>) -> ParseResult<Token<'a>> {
         match self.accept(p) {
             Ok(Some(v)) => Ok(Some(v)),
-            Ok(None) => Err(ParseError::new(self.current_span(), ParseErrorKind::Any)),
+            Ok(None) => Err(ParseError::new(
+                self.current_span(),
+                ParseErrorKind::UnexpectedToken,
+            )),
             Err(e) => Err(e),
         }
     }
@@ -88,7 +116,9 @@ impl<'a> Parser<'a> {
         end: impl Pattern<Token<'a>> + Copy,
     ) -> ParseResult<Vec<(Token<'a>, Span)>> {
         let mut tokens = vec![];
-        self.accept(start)?;
+        if self.accept(start)?.is_none() {
+            return Ok(None);
+        }
         while self.accept(end).unwrap().is_none() {
             tokens.push(self.tokens[self.cursor].clone());
             if self.advance().is_err() {
@@ -117,6 +147,7 @@ impl<'a> Parser<'a> {
     pub fn parse(&mut self) -> Result<Program, Box<Report>> {
         let mut declarations = vec![];
         let mut errors = vec![];
+        let mut current_cursor = self.cursor;
         while !self.done() {
             match self.parse_extern_task() {
                 Ok(Some(t)) => declarations.push(t),
@@ -129,6 +160,11 @@ impl<'a> Parser<'a> {
                 Ok(None) => {}
                 Err(e) => errors.push(e),
             }
+
+            if self.cursor == current_cursor {
+                break;
+            }
+            current_cursor = self.cursor;
         }
 
         for error in errors {
@@ -189,6 +225,7 @@ impl<'a> Parser<'a> {
         //    let mut parser = Parser::new(Vec::from(t));
         //    parser.parse_external_params()
         //});
+        self.require(Token::Semicolon)?;
 
         Ok(Some(Declaration::ExternTask {
             name,
@@ -199,6 +236,7 @@ impl<'a> Parser<'a> {
 
     pub fn parse_task(&mut self) -> ParseResult<types::Declaration> {
         //let mut params = vec![];
+        let mut returns = None;
         self.require(Token::Task)?;
         let name = self
             .require(|t| matches!(t, Token::Ident(_)))?
@@ -210,34 +248,34 @@ impl<'a> Parser<'a> {
         let params = Parser::new(param_tokens, self.source)
             .parse_params()?
             .unwrap();
-        if let Ok(locals) = self.accept_delimited(Token::LessThan, Token::GreaterThan) {
-            todo!()
+
+        if self.accept(Token::Arrow)?.is_some() {
+            returns.replace(self.parse_ty()?.unwrap());
         }
 
-        let stmt_tokens = self
-            .accept_delimited(Token::CurlyOpen, Token::CurlyClose)?
-            .unwrap();
+        if let Some(locals) = self
+            .accept_delimited(Token::LessThan, Token::GreaterThan)
+            .error(ParseErrorKind::UnexpectedToken)?
+        {
+            //dbg!(locals);
+        }
 
-        let mut stmt_parser = Parser::new(stmt_tokens, self.source);
-        let stmts: Vec<Result<Statement, ParseError>> = stmt_parser
-            .parse_separated(Token::Semicolon, |t| parse_stmt(t))
-            .into_iter()
-            .filter_map(|t| match t {
-                Ok(Some(v)) => Some(Ok(v)),
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect();
+        let mut body = vec![];
+        self.require(Token::CurlyOpen)?;
 
-        let body: Result<Vec<Statement>, ParseError> = stmts.into_iter().collect();
+        while let Some(stmt) = self.parse_stmt()? {
+            body.push(stmt);
+        }
+
+        self.require(Token::CurlyClose)?;
 
         Ok(Some(Declaration::Task {
             location: Location { line: 0, column: 0 },
             name,
             params,
-            returns: None,
+            returns,
             locals: vec![],
-            body: body.unwrap(),
+            body,
         }))
     }
 
@@ -268,23 +306,114 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_ty(&mut self) -> ParseResult<types::Type> {
-        if let Some(res) = self.accept(Token::Ident("bool"))? {}
-        if let Some(res) = self.accept(Token::Ident("any"))? {}
+        if self.accept(Token::Ident("bool"))?.is_some() {
+            return Ok(Some(Type::Bool));
+        }
+        if self.accept(Token::Ident("any"))?.is_some() {
+            return Ok(Some(Type::Any));
+        }
+        if let Some(res) = self.accept(|t| matches!(t, Token::Ident(_)))? {
+            let ty_str = res.to_string();
+            let (sign, bits) = ty_str.split_at(1);
+            let signed = match sign {
+                "u" => false,
+                "i" => true,
+                _ => {
+                    return Err(ParseError::new(
+                        self.current_span(),
+                        ParseErrorKind::BadType,
+                    ))
+                }
+            };
+            let width = bits.parse().map_err(|e| {
+                ParseError::new(self.current_span(), ParseErrorKind::ParseIntError(e))
+            })?;
+            return Ok(Some(Type::Integer { signed, width }));
+        }
         Ok(None)
     }
 
     fn parse_stmt(&mut self) -> ParseResult<Statement> {
-        let current_span = self.current_span();
-        if let Some(res) = self.accept([Token::Return].as_slice())? {
-            match res {
-                Token::Return => return Ok(Some(Statement::Return(None))),
-                _ => {
-                    return Err(ParseError::new(
-                        current_span,
-                        ParseErrorKind::UnknownKeyword,
-                    ))
-                }
+        if self.accept(Token::Return)?.is_some() {
+            let ret_value = self.parse_expr().expected_expr()?;
+            self.require(Token::Semicolon)
+                .expect_token(Token::Semicolon)?;
+            return Ok(Some(Statement::Return(ret_value)));
+        }
+        if let Some(expr) = self.parse_expr()? {
+            if self
+                .accept(Token::Semicolon)
+                .expect_token(Token::Semicolon)?
+                .is_some()
+            {
+                return Ok(Some(Statement::Expression(expr)));
             }
+            if self
+                .accept(Token::Equals)
+                .error(ParseErrorKind::ExpectedToken(Token::Equals))?
+                .is_some()
+            {
+                let rhs = self.parse_expr().expected_expr()?.unwrap();
+                self.require(Token::Semicolon)
+                    .expect_token(Token::Semicolon)?;
+                return Ok(Some(Statement::Assign {
+                    location: expr,
+                    value: rhs,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn parse_expr(&mut self) -> ParseResult<Expression> {
+        if self
+            .accept_sequence(
+                [
+                    |t| matches!(t, Token::Ident(_)),
+                    |t| matches!(t, Token::ParenOpen),
+                ]
+                .as_slice(),
+            )?
+            .is_some()
+        {
+            self.require(Token::ParenClose)
+                .expect_token(Token::ParenClose)?;
+
+            return Ok(None);
+        }
+        if let Some(left) = self.parse_value()? {
+            if self.accept(Token::Plus)?.is_some() {
+                let right = self.parse_expr()?.ok_or(ParseError::new(
+                    self.current_span(),
+                    ParseErrorKind::ExpectedExpression,
+                ))?;
+                return Ok(Some(Expression::BinaryOperation {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    operator: types::BinaryOperator::Add,
+                }));
+            }
+            if self.accept(Token::ParenOpen)?.is_some() {
+                self.require(Token::ParenClose)
+                    .expect_token(Token::ParenClose)?;
+            }
+
+            return Ok(Some(left));
+        }
+
+        self.parse_value()
+    }
+
+    fn parse_value(&mut self) -> ParseResult<Expression> {
+        if let Some(n) = self.accept(|t| matches!(t, Token::Number(_)))? {
+            let Token::Number(val) = n else {
+                unreachable!()
+            };
+            return Ok(Some(Expression::Literal(types::Literal::Int(val as i64))));
+        }
+        if let Some(n) = self.accept(|t| matches!(t, Token::Ident(_)))? {
+            let Token::Ident(val) = n else { unreachable!() };
+            return Ok(Some(Expression::Var(val.to_string())));
         }
         Ok(None)
     }
@@ -294,6 +423,7 @@ fn parse_stmt(tokens: &[(Token<'_>, Span)]) -> ParseResult<Statement> {
     dbg!(tokens);
     match tokens {
         [(Token::Return, _)] => Ok(Some(Statement::Return(None))),
+        [(Token::Return, _), remaining @ ..] => Ok(Some(Statement::Return(parse_expr(remaining)?))),
         [] => Ok(None),
         other => Ok(Some(Statement::Expression(parse_expr(other)?.unwrap()))),
         //_ => Err(ParseError::Any),
@@ -301,6 +431,7 @@ fn parse_stmt(tokens: &[(Token<'_>, Span)]) -> ParseResult<Statement> {
 }
 
 fn parse_expr(tokens: &[(Token<'_>, Span)]) -> ParseResult<Expression> {
+    dbg!(tokens);
     match tokens {
         [(Token::Number(n), _)] => Ok(Some(Expression::Literal(types::Literal::Int(*n as i64)))),
         _ => Ok(None),
