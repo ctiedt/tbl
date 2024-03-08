@@ -53,6 +53,18 @@ pub enum Token<'a> {
     #[token("->")]
     Arrow,
 
+    #[token("==")]
+    DoubleEqual,
+
+    #[token(">=")]
+    GreaterEqual,
+
+    #[token("<=")]
+    LessEqual,
+
+    #[token("!=")]
+    Unequal,
+
     #[token("@")]
     At,
 
@@ -110,6 +122,12 @@ pub enum Token<'a> {
     #[token("&")]
     And,
 
+    #[token("|")]
+    Pipe,
+
+    #[token("!")]
+    Exclamation,
+
     #[regex(r"\d+", |lex| lex.slice().parse::<u64>().unwrap())]
     Number(u64),
 
@@ -139,6 +157,10 @@ impl<'a> Display for Token<'a> {
                 Token::Ident(id) => id.to_string(),
                 Token::Varargs => "...".to_string(),
                 Token::Arrow => "->".to_string(),
+                Token::DoubleEqual => "==".to_string(),
+                Token::Unequal => "!=".to_string(),
+                Token::GreaterEqual => ">=".to_string(),
+                Token::LessEqual => "<=".to_string(),
                 Token::At => "@".to_string(),
                 Token::ParenOpen => "(".to_string(),
                 Token::ParenClose => ")".to_string(),
@@ -158,6 +180,8 @@ impl<'a> Display for Token<'a> {
                 Token::Star => "*".to_string(),
                 Token::Slash => "/".to_string(),
                 Token::And => "&".to_string(),
+                Token::Pipe => "|".to_string(),
+                Token::Exclamation => "!".to_string(),
                 Token::Number(n) => format!("{n}"),
                 Token::String(s) => s.to_string(),
             }

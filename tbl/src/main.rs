@@ -12,7 +12,7 @@ use miette::IntoDiagnostic;
 use tracing::error;
 use tracing_subscriber::FmtSubscriber;
 
-use tbl_parser::parse;
+use tbl_parser::{parse, resolve_directives};
 
 mod codegen;
 
@@ -149,7 +149,8 @@ fn main() -> miette::Result<()> {
     tracing::subscriber::set_global_default(FmtSubscriber::builder().pretty().finish())
         .into_diagnostic()?;
 
-    let program = parse(&args.file);
+    let program = resolve_directives(parse(&args.file));
+    dbg!(&program);
 
     let mut shared_builder = settings::builder();
     shared_builder.enable("is_pic").into_diagnostic()?;

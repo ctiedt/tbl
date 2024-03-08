@@ -2,9 +2,12 @@ use logos::Logos;
 use tbl_parser::{Parser, Source, Span, Token};
 
 fn main() {
-    let source = include_str!("../../examples/if.tbl");
+    let mut args = std::env::args();
+    let path = args.nth(1).unwrap();
 
-    let lexer = Token::lexer(source);
+    let source = std::fs::read_to_string(&path).unwrap();
+
+    let lexer = Token::lexer(&source);
     let tokens: Result<Vec<(Token<'_>, Span)>, ()> = lexer
         .spanned()
         .map(|(t, s)| match t {
@@ -16,15 +19,10 @@ fn main() {
     let mut parser = Parser::new(
         tokens.unwrap(),
         Source {
-            name: "int.tbl",
-            contents: source,
+            name: &path,
+            contents: &source,
         },
     );
     let program = parser.parse().unwrap();
-    //println!("{:?}", program);
     dbg!(program);
-    //let et = parser.parse_extern_task().unwrap().unwrap();
-    //dbg!(et);
-    //let t = parser.parse_task().unwrap().unwrap();
-    //dbg!(t);
 }

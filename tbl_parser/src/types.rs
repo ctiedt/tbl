@@ -1,8 +1,19 @@
+use std::fmt::Display;
+
 use super::Location;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Program {
     pub declarations: Vec<Declaration>,
+}
+
+impl Display for Program {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for decl in &self.declarations {
+            write!(f, "{decl}\n\n")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,10 +66,33 @@ impl Type {
     }
 }
 
+impl Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExternTaskParams {
     Variadic,
     WellKnown(Vec<(String, Type)>),
+}
+
+impl Display for ExternTaskParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExternTaskParams::Variadic => write!(f, "..."),
+            ExternTaskParams::WellKnown(params) => write!(
+                f,
+                "{}",
+                params
+                    .iter()
+                    .map(|(s, t)| format!("{s}: {t}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
 }
 
 impl ExternTaskParams {
@@ -104,6 +138,63 @@ pub enum Declaration {
     },
 }
 
+impl Display for Declaration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Declaration::ExternTask {
+                name,
+                params,
+                returns,
+            } => write!(
+                f,
+                "extern task {name}({params}){};",
+                if let Some(returns) = returns {
+                    format!(" -> {returns}")
+                } else {
+                    "".to_string()
+                }
+            ),
+            Declaration::Task {
+                location: _,
+                name,
+                params,
+                returns,
+                locals,
+                body,
+            } => {
+                write!(
+                    f,
+                    "task {name}({})",
+                    params
+                        .iter()
+                        .map(|(s, t)| format!("{s}: {t}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )?;
+                if let Some(returns) = returns {
+                    write!(f, " -> {returns}")?;
+                }
+                if !locals.is_empty() {
+                    write!(f, "\n<")?;
+                    for (name, ty) in locals {
+                        write!(f, "{name}: {ty}, ")?;
+                    }
+                    write!(f, ">\n")?;
+                }
+                write!(f, "{{\n")?;
+                for stmt in body {
+                    writeln!(f, "{stmt}")?;
+                }
+                write!(f, "}}")?;
+                Ok(())
+            }
+            Declaration::Struct { name, members } => todo!(),
+            Declaration::Global { name, type_, value } => todo!(),
+            Declaration::Directive { name, args } => todo!(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Local {
     pub name: String,
@@ -128,6 +219,29 @@ pub enum Statement {
         location: Expression,
         value: Expression,
     },
+}
+
+impl Display for Statement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Statement::Conditional { test, then, else_ } => write!(
+                f,
+                r#"if {test} {{
+{}
+}}"#,
+                then.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Statement::Exit => write!(f, "exit;"),
+            Statement::Expression(e) => write!(f, "{e};"),
+            Statement::Return(None) => write!(f, "return;"),
+            Statement::Return(Some(val)) => write!(f, "return {val};"),
+            Statement::Schedule { task, args } => todo!(),
+            Statement::Assign { location, value } => write!(f, "{location} = {value};"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,6 +278,33 @@ pub enum Expression {
     },
 }
 
+impl Display for Expression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expression::Literal(l) => write!(f, "{l}"),
+            Expression::Var(v) => write!(f, "{v}"),
+            Expression::Call { task, args } => write!(
+                f,
+                "{task}({})",
+                args.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Expression::BinaryOperation {
+                left,
+                right,
+                operator,
+            } => todo!(),
+            Expression::UnaryOperation { value, operator } => todo!(),
+            Expression::StructAccess { value, member } => todo!(),
+            Expression::Cast { value, to } => todo!(),
+            Expression::Index { value, at } => todo!(),
+            Expression::SizeOf { value } => todo!(),
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BinaryOperator {
     Equal,
@@ -195,4 +336,32 @@ pub enum Literal {
     Bool(bool),
     Struct(Vec<(String, Expression)>),
     Array(Vec<Expression>),
+}
+
+impl Display for Literal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Literal::Int(i) => write!(f, "{i}"),
+            Literal::String(s) => write!(f, "\"{s}\""),
+            Literal::Bool(b) => write!(f, "{b}"),
+            Literal::Struct(s) => {
+                write!(
+                    f,
+                    "{{{}}}",
+                    s.iter()
+                        .map(|(s, t)| format!("{s}: {t}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+            Literal::Array(a) => write!(
+                f,
+                "[{}]",
+                a.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
 }
