@@ -30,6 +30,8 @@ pub enum ParseErrorKind {
     BadType,
     #[error("expected token `{0}`")]
     ExpectedToken(Token<'static>),
+    #[error("expected `{0}`")]
+    ExpectedPattern(String),
     #[error("expected expression")]
     ExpectedExpression,
     #[error("bad integer value")]

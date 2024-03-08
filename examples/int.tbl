@@ -8,9 +8,9 @@ task add(a: u32, b: u32, c: u32) -> u32 {
 task main() -> u32
 <a: u32, b: u32, c: u32>
 {
-    a: u32 = 42;
-    b: u32 = 43;
-    c: u32 = add(a, b, 238);
+    a = 42;
+    b = 43;
+    c = add(a, b, 238);
     //putchar('0' + c);
     printf("%d\n", c);
     return 0;

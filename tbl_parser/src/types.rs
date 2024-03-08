@@ -88,7 +88,7 @@ pub enum Declaration {
         name: String,
         params: Vec<(String, Type)>,
         returns: Option<Type>,
-        locals: Vec<Local>,
+        locals: Vec<(String, Type)>,
         body: Vec<Statement>,
     },
     Struct {
