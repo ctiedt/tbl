@@ -94,7 +94,7 @@ fn link<S: AsRef<str>>(
                 "-l:crtn.o",
             ];
             args.extend(linked_objects.iter().map(|f| f.as_ref()));
-            std::process::Command::new("ld.lld")
+            std::process::Command::new("ld")
                 .args(args)
                 .spawn()
                 .into_diagnostic()?
@@ -149,9 +149,7 @@ fn main() -> miette::Result<()> {
     tracing::subscriber::set_global_default(FmtSubscriber::builder().pretty().finish())
         .into_diagnostic()?;
 
-    let source_file = std::fs::read_to_string(&args.file).into_diagnostic()?;
-
-    let program = parse(&source_file, &args.preprocessor)?;
+    let program = parse(&args.file);
 
     let mut shared_builder = settings::builder();
     shared_builder.enable("is_pic").into_diagnostic()?;

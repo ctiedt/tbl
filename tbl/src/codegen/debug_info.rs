@@ -199,10 +199,13 @@ impl DebugInfoGenerator {
             DW_AT_decl_file,
             AttributeValue::FileIndex(Some(self.file_id)),
         );
-        die.set(DW_AT_decl_line, AttributeValue::Udata(func.location.line));
+        die.set(
+            DW_AT_decl_line,
+            AttributeValue::Udata(func.location.line as u64),
+        );
         die.set(
             DW_AT_decl_column,
-            AttributeValue::Udata(func.location.column),
+            AttributeValue::Udata(func.location.column as u64),
         );
         die.set(
             DW_AT_frame_base,

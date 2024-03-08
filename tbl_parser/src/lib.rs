@@ -3,21 +3,22 @@ mod pattern;
 mod token;
 pub mod types;
 
-use std::{io::SeekFrom, ops::Range};
+use std::{ops::Range, path::Path};
 
 use crate::types::Statement;
-use ariadne::{sources, Label, Report};
+use ariadne::{Label, Report};
 use error::{ParseError, ParseErrorKind, ParseResult, ParseResultExt};
+use logos::Logos;
 use pattern::Pattern;
 pub use token::Token;
 use types::{Declaration, Expression, ExternTaskParams, Program, Type};
 
 pub type Span = Range<usize>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Location {
-    line: usize,
-    column: usize,
+    pub line: usize,
+    pub column: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -74,31 +75,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn accept_sequence(
-        &mut self,
-        p: &[impl Pattern<Token<'a>> + Copy],
-    ) -> ParseResult<Vec<Token<'a>>> {
-        let mut res = vec![];
-        let mut diff = 0;
-        for pat in p {
-            match self.accept(*pat) {
-                Ok(Some(v)) => {
-                    res.push(v);
-                    diff += 1;
-                }
-                Ok(None) => {
-                    self.cursor -= diff;
-                    return Ok(None);
-                }
-                Err(e) => {
-                    self.cursor -= diff;
-                    return Err(e);
-                }
-            }
-        }
-        Ok(Some(res))
-    }
-
     fn require(&mut self, p: impl Pattern<Token<'a>>) -> ParseResult<Token<'a>> {
         match self.accept(p) {
             Ok(Some(v)) => Ok(Some(v)),
@@ -129,18 +105,6 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(Some(tokens))
-    }
-
-    fn accept_many(&mut self, p: &[impl Pattern<Token<'a>> + Copy]) -> ParseResult<Vec<Token<'a>>> {
-        let mut tokens = vec![];
-        for pat in p {
-            match self.accept(*pat) {
-                Ok(Some(t)) => tokens.push(t),
-                Ok(None) => {}
-                Err(e) => return Err(e),
-            }
-        }
         Ok(Some(tokens))
     }
 
@@ -202,20 +166,6 @@ impl<'a> Parser<'a> {
         }
 
         Ok(Program { declarations })
-    }
-
-    fn parse_separated<T>(
-        &mut self,
-        sep: Token<'a>,
-        p: impl Fn(&[(Token<'a>, Span)]) -> ParseResult<T>,
-    ) -> Vec<ParseResult<T>> {
-        let mut res = vec![];
-        let splits = self.tokens.split(|(t, _)| *t == sep);
-        for split in splits {
-            res.push(p(split));
-        }
-
-        res
     }
 
     pub fn parse_extern_task(&mut self) -> ParseResult<types::Declaration> {
@@ -358,6 +308,24 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stmt(&mut self) -> ParseResult<Statement> {
+        if self.accept(Token::If)?.is_some() {
+            let test = self.parse_expr()?.unwrap();
+            self.require(Token::CurlyOpen)?;
+            let mut then = vec![];
+            let mut else_ = vec![];
+            while let Some(stmt) = self.parse_stmt()? {
+                then.push(stmt);
+            }
+            self.require(Token::CurlyClose)?;
+            if self.accept(Token::Else)?.is_some() {
+                self.require(Token::CurlyOpen)?;
+                while let Some(stmt) = self.parse_stmt()? {
+                    else_.push(stmt);
+                }
+                self.require(Token::CurlyClose)?;
+            }
+            return Ok(Some(Statement::Conditional { test, then, else_ }));
+        }
         if self.accept(Token::Return)?.is_some() {
             let ret_value = self.parse_expr().expected_expr()?;
             self.require(Token::Semicolon)
@@ -429,6 +397,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_value(&mut self) -> ParseResult<Expression> {
+        if self.accept(Token::True)?.is_some() {
+            return Ok(Some(Expression::Literal(types::Literal::Bool(true))));
+        }
+        if self.accept(Token::False)?.is_some() {
+            return Ok(Some(Expression::Literal(types::Literal::Bool(false))));
+        }
         if let Some(n) = self.accept(|t| matches!(t, Token::Number(_)))? {
             let Token::Number(val) = n else {
                 unreachable!()
@@ -439,8 +413,9 @@ impl<'a> Parser<'a> {
             let Token::String(val) = t else {
                 unreachable!()
             };
+
             return Ok(Some(Expression::Literal(types::Literal::String(
-                val.to_string(),
+                snailquote::unescape(&val.to_string()).unwrap(),
             ))));
         }
         if let Some(n) = self.accept(|t| matches!(t, Token::Ident(_)))? {
@@ -449,4 +424,25 @@ impl<'a> Parser<'a> {
         }
         Ok(None)
     }
+}
+
+pub fn parse<'a, P: AsRef<Path>>(path: P) -> Program {
+    let path_str = path.as_ref().display().to_string();
+    let source = std::fs::read_to_string(path).unwrap();
+    let lexer = Token::lexer(&source);
+    let tokens: Result<Vec<(Token<'_>, Span)>, ()> = lexer
+        .spanned()
+        .map(|(t, s)| match t {
+            Ok(t) => Ok((t, s)),
+            Err(e) => Err(e),
+        })
+        .collect();
+    let mut parser = Parser::new(
+        tokens.unwrap(),
+        Source {
+            name: &path_str,
+            contents: &source,
+        },
+    );
+    parser.parse().unwrap()
 }

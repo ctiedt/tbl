@@ -38,6 +38,12 @@ pub enum Token<'a> {
     #[token("return")]
     Return,
 
+    #[token("true")]
+    True,
+
+    #[token("false")]
+    False,
+
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
     Ident(&'a str),
 
@@ -128,6 +134,8 @@ impl<'a> Display for Token<'a> {
                 Token::Schedule => "schedule".to_string(),
                 Token::Exit => "exit".to_string(),
                 Token::Return => "return".to_string(),
+                Token::True => "true".to_string(),
+                Token::False => "false".to_string(),
                 Token::Ident(id) => id.to_string(),
                 Token::Varargs => "...".to_string(),
                 Token::Arrow => "->".to_string(),

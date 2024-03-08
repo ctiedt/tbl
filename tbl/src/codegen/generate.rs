@@ -161,7 +161,7 @@ impl CodeGen {
                     func_builder.seal_block(fn_entry);
 
                     let locals_size = params.iter().map(|(_, p)| self.type_size(p)).sum::<u32>()
-                        + locals.iter().map(|l| self.type_size(&l.type_)).sum::<u32>();
+                        + locals.iter().map(|l| self.type_size(&l.1)).sum::<u32>();
                     let data = StackSlotData::new(StackSlotKind::ExplicitSlot, locals_size);
                     let locals_slot = func_builder.create_sized_stack_slot(data);
                     {
@@ -184,9 +184,9 @@ impl CodeGen {
                     }
 
                     for local in locals {
-                        let ty_size = self.type_size(&local.type_);
+                        let ty_size = self.type_size(&local.1);
                         let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
-                        fn_ctx.declare_local(&local.name, local.type_.clone(), ty_size)?;
+                        fn_ctx.declare_local(&local.0, local.1.clone(), ty_size)?;
                     }
 
                     for stmt in body {
@@ -301,7 +301,7 @@ impl CodeGen {
             None,
             false,
             false,
-            Location { line: 0, column: 0 },
+            Location::default(),
         );
         let fn_name = UserFuncName::user(0, fn_idx as u32);
 

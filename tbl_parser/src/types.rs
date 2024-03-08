@@ -1,6 +1,4 @@
-use std::str::FromStr;
-
-use super::{Location, ParseError};
+use super::Location;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Program {
