@@ -131,6 +131,17 @@ impl<'a> Parser<'a> {
                 }
             }
 
+            match self.parse_struct() {
+                Ok(Some(t)) => {
+                    declarations.push(t);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error.replace(e);
+                }
+            }
+
             if let Some(error) = error {
                 errors.push(error);
             }
@@ -220,6 +231,33 @@ impl<'a> Parser<'a> {
         Ok(Some(Declaration::Global { name, type_, value }))
     }
 
+    fn parse_struct(&mut self) -> ParseResult<types::Declaration> {
+        if self.accept(Token::Struct)?.is_none() {
+            return Ok(None);
+        }
+
+        let name = self
+            .require(|t| matches!(t, Token::Ident(_)))?
+            .ok_or(self.error(ParseErrorKind::ExpectedExpression))?
+            .to_string();
+
+        let mut members = vec![];
+        self.require(Token::CurlyOpen)?;
+        let mut no_params = true;
+        while let Some(param) = self.parse_param()? {
+            no_params = false;
+            members.push(param);
+            if self.accept(Token::Comma)?.is_none() {
+                self.require(Token::CurlyClose)?;
+            }
+        }
+        if no_params {
+            self.require(Token::CurlyClose)?;
+        }
+
+        Ok(Some(Declaration::Struct { name, members }))
+    }
+
     fn parse_extern_task(&mut self) -> ParseResult<types::Declaration> {
         let mut returns = None;
         if self.accept(Token::Extern)?.is_none() {
@@ -307,9 +345,11 @@ impl<'a> Parser<'a> {
     fn parse_param(&mut self) -> ParseResult<(String, Type)> {
         if let Some(name) = self.accept(|t| matches!(t, Token::Ident(_)))? {
             let name = name.to_string();
-            self.require(Token::Colon)?.unwrap();
-            let ty = self.parse_ty()?;
-            Ok(Some((name, ty.unwrap())))
+            self.require(Token::Colon)?;
+            let ty = self
+                .parse_ty()?
+                .ok_or(self.error(ParseErrorKind::BadType))?;
+            Ok(Some((name, ty)))
         } else {
             Ok(None)
         }
@@ -347,7 +387,46 @@ impl<'a> Parser<'a> {
         if self.accept(Token::Ident("any"))?.is_some() {
             return Ok(Some(Type::Any));
         }
-        if let Some(res) = self.accept(|t| matches!(t, Token::Ident(_)))? {
+        if self.accept(Token::Task)?.is_some() {
+            let mut params = vec![];
+            let mut returns = None;
+
+            self.require(Token::ParenOpen)?;
+            let mut no_params = true;
+            while let Some(param) = self.parse_ty()? {
+                no_params = false;
+                params.push(param);
+                if self.accept(Token::Comma)?.is_none() {
+                    self.require(Token::ParenClose)?;
+                }
+            }
+            if no_params {
+                self.require(Token::ParenClose)?;
+            }
+
+            if self.accept(Token::Arrow)?.is_some() {
+                returns.replace(Box::new(self.parse_ty()?.unwrap()));
+            }
+
+            return Ok(Some(Type::TaskPtr { params, returns }));
+        }
+        if self.accept(Token::BracketOpen)?.is_some() {
+            let item = Box::new(
+                self.parse_ty()?
+                    .ok_or(self.error(ParseErrorKind::BadType))?,
+            );
+
+            self.require(Token::Semicolon)?;
+
+            let length = self
+                .parse_int()?
+                .ok_or(self.error(ParseErrorKind::BadType))?;
+
+            self.require(Token::BracketClose)?;
+
+            return Ok(Some(Type::Array { item, length }));
+        }
+        if let Some(res) = self.accept(|t| matches!(t, Token::IntType(_)))? {
             let ty_str = res.to_string();
             let (sign, bits) = ty_str.split_at(1);
             let signed = match sign {
@@ -364,6 +443,9 @@ impl<'a> Parser<'a> {
                 ParseError::new(self.current_span(), ParseErrorKind::ParseIntError(e))
             })?;
             return Ok(Some(Type::Integer { signed, width }));
+        }
+        if let Some(res) = self.accept(|t| matches!(t, Token::Ident(_)))? {
+            return Ok(Some(Type::Named(res.to_string())));
         }
         if self.accept(Token::And)?.is_some() {
             let inner = self
@@ -393,10 +475,23 @@ impl<'a> Parser<'a> {
             }
             return Ok(Some(Statement::Conditional { test, then, else_ }));
         }
+        if self.accept(Token::Loop)?.is_some() {
+            self.require(Token::CurlyOpen)?;
+            let mut body = vec![];
+            while let Some(stmt) = self.parse_stmt()? {
+                body.push(stmt);
+            }
+            self.require(Token::CurlyClose)?;
+            return Ok(Some(Statement::Loop { body }));
+        }
         if self.accept(Token::Return)?.is_some() {
-            let ret_value = self.parse_expr().expected_expr()?;
+            let ret_value = self.parse_expr()?;
             self.require(Token::Semicolon)?;
             return Ok(Some(Statement::Return(ret_value)));
+        }
+        if self.accept(Token::Exit)?.is_some() {
+            self.require(Token::Semicolon)?;
+            return Ok(Some(Statement::Exit));
         }
         if self.accept(Token::Schedule)?.is_some() {
             let task = self
@@ -442,66 +537,165 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> ParseResult<Expression> {
-        if let Some(op) =
-            self.accept([Token::Star, Token::And, Token::Minus, Token::Exclamation].as_slice())?
-        {
-            let operator = match op {
-                Token::Star => UnaryOperator::Dereference,
-                Token::And => UnaryOperator::Reference,
-                Token::Minus => UnaryOperator::Minus,
-                Token::Exclamation => UnaryOperator::Not,
-                _ => unreachable!(),
-            };
-            let value = self.parse_expr()?.ok_or(ParseError::new(
-                self.current_span(),
-                ParseErrorKind::ExpectedExpression,
-            ))?;
-            return Ok(Some(Expression::UnaryOperation {
-                value: Box::new(value),
-                operator,
-            }));
+        if let Some(left) = self.parse_comparison()? {
+            if let Some(op) = self.accept([Token::DoubleEqual, Token::Unequal].as_slice())? {
+                let operator = match op {
+                    Token::DoubleEqual => BinaryOperator::Equal,
+                    Token::Unequal => BinaryOperator::Unequal,
+                    _ => unreachable!(),
+                };
+                let right = self
+                    .parse_comparison()?
+                    .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
+                Ok(Some(Expression::BinaryOperation {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    operator,
+                }))
+            } else {
+                Ok(Some(left))
+            }
+        } else {
+            Ok(None)
         }
-        if let Some(left) = self.parse_value()? {
+    }
+
+    fn parse_comparison(&mut self) -> ParseResult<Expression> {
+        if let Some(left) = self.parse_term()? {
             if let Some(op) = self.accept(
                 [
-                    Token::Plus,
-                    Token::Minus,
-                    Token::Star,
-                    Token::Slash,
+                    Token::GreaterThan,
+                    Token::GreaterEqual,
+                    Token::LessThan,
+                    Token::LessEqual,
                     Token::And,
                     Token::Pipe,
-                    Token::DoubleEqual,
-                    Token::GreaterEqual,
-                    Token::LessEqual,
-                    Token::Unequal,
-                    Token::GreaterThan,
-                    Token::LessThan,
                 ]
                 .as_slice(),
             )? {
                 let operator = match op {
-                    Token::Plus => BinaryOperator::Add,
-                    Token::Minus => BinaryOperator::Subtract,
-                    Token::Star => BinaryOperator::Multiply,
-                    Token::Slash => BinaryOperator::Divide,
+                    Token::GreaterThan => BinaryOperator::GreaterThan,
+                    Token::GreaterEqual => BinaryOperator::GreaterOrEqual,
+                    Token::LessThan => BinaryOperator::LessThan,
+                    Token::LessEqual => BinaryOperator::LessOrEqual,
                     Token::And => BinaryOperator::And,
                     Token::Pipe => BinaryOperator::Or,
-                    Token::DoubleEqual => BinaryOperator::Equal,
-                    Token::GreaterEqual => BinaryOperator::GreaterOrEqual,
-                    Token::LessEqual => BinaryOperator::LessOrEqual,
-                    Token::Unequal => BinaryOperator::Unequal,
-                    Token::GreaterThan => BinaryOperator::GreaterThan,
-                    Token::LessThan => BinaryOperator::LessThan,
                     _ => unreachable!(),
                 };
-                let right = self.parse_expr()?.ok_or(ParseError::new(
-                    self.current_span(),
-                    ParseErrorKind::ExpectedExpression,
-                ))?;
-                return Ok(Some(Expression::BinaryOperation {
+                let right = self
+                    .parse_term()?
+                    .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
+                Ok(Some(Expression::BinaryOperation {
                     left: Box::new(left),
                     right: Box::new(right),
                     operator,
+                }))
+            } else {
+                Ok(Some(left))
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn parse_term(&mut self) -> ParseResult<Expression> {
+        if let Some(left) = self.parse_factor()? {
+            if let Some(op) = self.accept([Token::Plus, Token::Minus].as_slice())? {
+                let operator = match op {
+                    Token::Plus => BinaryOperator::Add,
+                    Token::Minus => BinaryOperator::Subtract,
+                    _ => unreachable!(),
+                };
+                let right = self
+                    .parse_factor()?
+                    .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
+                Ok(Some(Expression::BinaryOperation {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    operator,
+                }))
+            } else {
+                Ok(Some(left))
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn parse_factor(&mut self) -> ParseResult<Expression> {
+        if let Some(left) = self.parse_unary()? {
+            if let Some(op) = self.accept([Token::Star, Token::Slash].as_slice())? {
+                let operator = match op {
+                    Token::Star => BinaryOperator::Multiply,
+                    Token::Slash => BinaryOperator::Divide,
+                    _ => unreachable!(),
+                };
+                let right = self
+                    .parse_unary()?
+                    .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
+                Ok(Some(Expression::BinaryOperation {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    operator,
+                }))
+            } else {
+                Ok(Some(left))
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn parse_unary(&mut self) -> ParseResult<Expression> {
+        if let Some(op) =
+            self.accept([Token::Exclamation, Token::Minus, Token::Star, Token::And].as_slice())?
+        {
+            let operator = match op {
+                Token::Exclamation => UnaryOperator::Not,
+                Token::Minus => UnaryOperator::Minus,
+                Token::Star => UnaryOperator::Dereference,
+                Token::And => UnaryOperator::Reference,
+                _ => unreachable!(),
+            };
+            let value = Box::new(
+                self.parse_postfix()?
+                    .ok_or(self.error(ParseErrorKind::ExpectedExpression))?,
+            );
+            Ok(Some(Expression::UnaryOperation { value, operator }))
+        } else {
+            self.parse_postfix()
+        }
+    }
+
+    fn parse_postfix(&mut self) -> ParseResult<Expression> {
+        if let Some(value) = self.parse_primary()? {
+            if self.accept(Token::Period)?.is_some() {
+                let member = self
+                    .require(|t| matches!(t, Token::Ident(_)))?
+                    .ok_or(self.error(ParseErrorKind::ExpectedExpression))?
+                    .to_string();
+                return Ok(Some(Expression::StructAccess {
+                    value: Box::new(value),
+                    member,
+                }));
+            }
+            if self.accept(Token::BracketOpen)?.is_some() {
+                let index = self
+                    .parse_expr()?
+                    .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
+                self.require(Token::BracketClose)?;
+                return Ok(Some(Expression::Index {
+                    value: Box::new(value),
+                    at: Box::new(index),
+                }));
+            }
+            if self.accept(Token::As)?.is_some() {
+                let to = self
+                    .parse_ty()?
+                    .ok_or(self.error(ParseErrorKind::BadType))?;
+                return Ok(Some(Expression::Cast {
+                    value: Box::new(value),
+                    to,
                 }));
             }
             if self.accept(Token::ParenOpen)?.is_some() {
@@ -512,6 +706,7 @@ impl<'a> Parser<'a> {
                     args.push(arg);
                     if self.accept(Token::Comma)?.is_none() {
                         self.require(Token::ParenClose)?;
+                        break;
                     }
                 }
                 if no_args {
@@ -519,15 +714,34 @@ impl<'a> Parser<'a> {
                 }
 
                 return Ok(Some(Expression::Call {
-                    task: Box::new(left),
+                    task: Box::new(value),
                     args,
                 }));
             }
-
-            return Ok(Some(left));
+            Ok(Some(value))
+        } else {
+            Ok(None)
         }
+    }
 
-        self.parse_value()
+    fn parse_primary(&mut self) -> ParseResult<Expression> {
+        if let Some(value) = self.parse_value()? {
+            return Ok(Some(value));
+        }
+        if self.accept(Token::Hash)?.is_some() {
+            let value = self
+                .parse_ty()?
+                .ok_or(self.error(ParseErrorKind::BadType))?;
+            return Ok(Some(Expression::SizeOf { value }));
+        }
+        if self.accept(Token::ParenOpen)?.is_some() {
+            let expr = self
+                .parse_expr()?
+                .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
+            self.require(Token::ParenClose)?;
+            return Ok(Some(expr));
+        }
+        Ok(None)
     }
 
     fn parse_value(&mut self) -> ParseResult<Expression> {
@@ -538,7 +752,23 @@ impl<'a> Parser<'a> {
             let Token::Ident(val) = n else { unreachable!() };
             return Ok(Some(Expression::Var(val.to_string())));
         }
+
         Ok(None)
+    }
+
+    fn parse_member(&mut self) -> ParseResult<(String, Expression)> {
+        let name = self
+            .require(|t| matches!(t, Token::Ident(_)))?
+            .ok_or(self.error(ParseErrorKind::ExpectedExpression))?
+            .to_string();
+
+        self.require(Token::Colon)?;
+
+        let value = self
+            .parse_expr()?
+            .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
+
+        Ok(Some((name, value)))
     }
 
     fn parse_literal(&mut self) -> ParseResult<Literal> {
@@ -548,11 +778,41 @@ impl<'a> Parser<'a> {
         if self.accept(Token::False)?.is_some() {
             return Ok(Some(Literal::Bool(false)));
         }
-        if let Some(n) = self.accept(|t| matches!(t, Token::Number(_)))? {
-            let Token::Number(val) = n else {
-                unreachable!()
-            };
-            return Ok(Some(Literal::Int(val as i64)));
+        if let Some(n) = self.parse_int()? {
+            return Ok(Some(Literal::Int(n as i64)));
+        }
+        if self.accept(Token::CurlyOpen)?.is_some() {
+            let mut members = vec![];
+            let mut no_members = true;
+            while let Some(arg) = self.parse_member()? {
+                no_members = false;
+                members.push(arg);
+                if self.accept(Token::Comma)?.is_none() {
+                    self.require(Token::CurlyClose)?;
+                    break;
+                }
+            }
+            if no_members {
+                self.require(Token::CurlyClose)?;
+            }
+
+            return Ok(Some(Literal::Struct(members)));
+        }
+        if self.accept(Token::BracketOpen)?.is_some() {
+            let mut items = vec![];
+            let mut no_items = true;
+            while let Some(arg) = self.parse_expr()? {
+                no_items = false;
+                items.push(arg);
+                if self.accept(Token::Comma)?.is_none() {
+                    self.require(Token::BracketClose)?;
+                }
+            }
+            if no_items {
+                self.require(Token::BracketClose)?;
+            }
+
+            return Ok(Some(Literal::Array(items)));
         }
         if let Some(t) = self.accept(|t| matches!(t, Token::String(_)))? {
             let Token::String(val) = t else {
@@ -562,6 +822,16 @@ impl<'a> Parser<'a> {
             return Ok(Some(Literal::String(
                 snailquote::unescape(&val.to_string()).unwrap(),
             )));
+        }
+        Ok(None)
+    }
+
+    fn parse_int(&mut self) -> ParseResult<u64> {
+        if let Some(n) = self.accept(|t| matches!(t, Token::Number(_)))? {
+            let Token::Number(val) = n else {
+                unreachable!()
+            };
+            return Ok(Some(val));
         }
         Ok(None)
     }

@@ -144,7 +144,9 @@ https://github.com/ctiedt/tbl/issues/new?title=Compiler+Panic&body={}"#,
 fn main() -> miette::Result<()> {
     let args = Args::parse();
 
-    std::panic::set_hook(Box::new(report_compiler_panic));
+    if std::env::var("RUST_BACKTRACE").is_err() {
+        std::panic::set_hook(Box::new(report_compiler_panic));
+    }
 
     tracing::subscriber::set_global_default(FmtSubscriber::builder().pretty().finish())
         .into_diagnostic()?;

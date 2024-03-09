@@ -198,6 +198,7 @@ impl CodeGen {
                         self.compile_stmt(&mut func_builder, &Statement::Return(None))?;
                     }
 
+                    func_builder.seal_all_blocks();
                     info!("{}", func_builder.func.display());
                     func_builder.finalize();
 
@@ -553,6 +554,19 @@ impl CodeGen {
                 let type_ = self.type_of(ctx, location).unwrap();
                 let loc = self.compile_lvalue(func_builder, location)?;
                 self.store_expr(func_builder, &type_, loc, 0, value)?;
+            }
+            Statement::Loop { body } => {
+                let block = func_builder.create_block();
+                func_builder.ins().jump(block, &[]);
+                func_builder.switch_to_block(block);
+                for stmt in body {
+                    self.compile_stmt(func_builder, stmt)?;
+                }
+                dbg!(block);
+                func_builder.ins().jump(block, &[]);
+                let next = func_builder.create_block();
+                func_builder.seal_block(next);
+                func_builder.switch_to_block(next);
             }
         }
         Ok(())

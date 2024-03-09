@@ -1,13 +1,19 @@
 extern task putchar(c: u8);
+extern task printf(...);
 
-task main() -> u32 {
-    var x: bool = false;
-    var y: u8 = 0;
+task sched_run() {}
+
+task main() -> u32
+<x: bool, y: u8>
+{
+    x = false;
+    y = 0;
     if x {
         y = 1;
     } else {
         y = 2;
     }
     putchar(48 + y);
+    //printf("%d\n", y);
     return 0;
 }

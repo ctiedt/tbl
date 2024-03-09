@@ -44,6 +44,12 @@ pub enum Token<'a> {
     #[token("false")]
     False,
 
+    #[token("as")]
+    As,
+
+    #[regex(r"([iu])(8|16|32|64)")]
+    IntType(&'a str),
+
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
     Ident(&'a str),
 
@@ -128,6 +134,9 @@ pub enum Token<'a> {
     #[token("!")]
     Exclamation,
 
+    #[token("#")]
+    Hash,
+
     #[regex(r"\d+", |lex| lex.slice().parse::<u64>().unwrap())]
     Number(u64),
 
@@ -154,6 +163,8 @@ impl<'a> Display for Token<'a> {
                 Token::Return => "return".to_string(),
                 Token::True => "true".to_string(),
                 Token::False => "false".to_string(),
+                Token::As => "as".to_string(),
+                Token::IntType(t) => t.to_string(),
                 Token::Ident(id) => id.to_string(),
                 Token::Varargs => "...".to_string(),
                 Token::Arrow => "->".to_string(),
@@ -181,6 +192,7 @@ impl<'a> Display for Token<'a> {
                 Token::Slash => "/".to_string(),
                 Token::And => "&".to_string(),
                 Token::Pipe => "|".to_string(),
+                Token::Hash => "#".to_string(),
                 Token::Exclamation => "!".to_string(),
                 Token::Number(n) => format!("{n}"),
                 Token::String(s) => s.to_string(),

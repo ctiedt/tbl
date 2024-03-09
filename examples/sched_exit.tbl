@@ -1,4 +1,6 @@
-@using("examples/std.tbl");
+@using("lib/std.tbl");
+
+global n: u32 = 0;
 
 task foo(n: &u32) {
     printf("Hello, foo %d\n", *n);
@@ -16,9 +18,7 @@ task bar(n: &u32) {
 }
 
 task main() -> i32
-<n: u32>
 {
-    n = 0;
     schedule foo(&n);
     schedule bar(&n);
     return 0;

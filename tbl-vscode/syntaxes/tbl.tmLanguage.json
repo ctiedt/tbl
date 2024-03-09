@@ -24,7 +24,7 @@
         },
         {
           "name": "keyword.control.tbl",
-          "match": "\\b(if|while|for|return|else|exit|schedule)\\b"
+          "match": "\\b(if|while|for|return|else|exit|schedule|loop)\\b"
         },
         {
           "name": "comment.line.tbl",

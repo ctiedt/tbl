@@ -2,11 +2,17 @@ extern task memcpy(dest: &any, src: &any, n: u64);
 extern task printf(...);
 extern task putchar(c: u32);
 extern task malloc(size: u64) -> &any;
-@cfg_platform("nt", "extern task Sleep(time: u32);");
-@cfg_platform("posix", "extern task usleep(time: u32);");
+//@cfg_platform("nt", "extern task Sleep(time: u32);");
+//@cfg_platform("posix", "extern task usleep(time: u32);");
+extern task usleep(time: u32);
 
-@cfg_platform("nt", "task tbl_sleep(time: u32) {Sleep(time); return;}");
-@cfg_platform("posix", "task tbl_sleep(time: u32) {usleep(time * 1000); return;}");
+//@cfg_platform("nt", "task tbl_sleep(time: u32) {Sleep(time); return;}");
+//@cfg_platform("posix", "task tbl_sleep(time: u32) {usleep(time * 1000); return;}");
+
+task tbl_sleep(time: u32) {
+    usleep(time * 1000); 
+    return;
+}
 
 struct Task {
     task_: task(&any) -> &any,
@@ -32,7 +38,7 @@ task sched_enqueue(task_: task(&any) -> &any, args: &any, arg_size: u64)
     ((SCHED.tasks)[SCHED.num_tasks]).args = arg_ptr;
     ((SCHED.tasks)[SCHED.num_tasks]).running = true;
     SCHED.num_tasks = SCHED.num_tasks + 1;
-    if (SCHED.current == -1) {
+    if SCHED.current == -1 {
         SCHED.current = 0;
     }
 }
@@ -44,26 +50,25 @@ task sched_exit() {
 task sched_run() 
 <current: i64, t: Task, t1: task(&any) -> &any, args: &any>
 {
-    current = SCHED.current;
-    if current == -1 {
-     return;
+    loop {
+        current = SCHED.current;
+        if current == -1 {
+         return;
+        }
+        t = (SCHED.tasks)[current];
+        if t.running {
+             t1 = t.task_;
+             args = t.args;
+             t1(args);
+             if TASK_EXITED {
+              ((SCHED.tasks)[current]).running = false;
+              TASK_EXITED = false;
+             }
+        }
+        SCHED.current = current + 1;
+        if (SCHED.current == SCHED.num_tasks) {
+             SCHED.current = 0;
+        }
+        tbl_sleep(100);
     }
-    t = (SCHED.tasks)[current];
-    //printf("%p\n", t.task_);
-    if t.running {
-         t1 = t.task_;
-         args = t.args;
-         t1(args);
-         if TASK_EXITED {
-          ((SCHED.tasks)[current]).running = false;
-          TASK_EXITED = false;
-         }
-    }
-    SCHED.current = current + 1;
-    if (SCHED.current == SCHED.num_tasks) {
-         SCHED.current = 0;
-    }
-    tbl_sleep(100);
-    sched_run();
-    return;
 }
