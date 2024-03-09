@@ -142,6 +142,9 @@ pub enum Token<'a> {
 
     #[regex(r#""([^"\\]|\\["\\bnfrt]|u[a-fA-F0-9]{4})*""#)]
     String(&'a str),
+
+    #[regex(r"'([^\\']|\\[^'])'")]
+    Char(&'a str),
 }
 
 impl<'a> Display for Token<'a> {
@@ -196,6 +199,7 @@ impl<'a> Display for Token<'a> {
                 Token::Exclamation => "!".to_string(),
                 Token::Number(n) => format!("{n}"),
                 Token::String(s) => s.to_string(),
+                Token::Char(c) => c.to_string(),
             }
         )
     }

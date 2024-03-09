@@ -152,7 +152,6 @@ fn main() -> miette::Result<()> {
         .into_diagnostic()?;
 
     let program = resolve_directives(parse(&args.file));
-    dbg!(&program);
 
     let mut shared_builder = settings::builder();
     shared_builder.enable("is_pic").into_diagnostic()?;

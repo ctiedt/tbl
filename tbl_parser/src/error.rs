@@ -16,8 +16,8 @@ impl ParseError {
 
 #[derive(Debug, Error)]
 pub enum ParseErrorKind {
-    #[error("any")]
-    Any,
+    #[error("malformed character")]
+    BadCharacter,
     #[error("unexpected token")]
     UnexpectedToken,
     #[error("unknown keyword")]

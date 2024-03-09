@@ -81,7 +81,7 @@ impl<'a> Parser<'a> {
         ParseError::new(self.current_span(), kind)
     }
 
-    pub fn parse(&mut self) -> Result<Program, Box<Report>> {
+    pub fn parse(&mut self) -> (Program, Vec<ParseError>) {
         let mut declarations = vec![];
         let mut errors = vec![];
         let mut current_cursor = self.cursor;
@@ -152,7 +152,7 @@ impl<'a> Parser<'a> {
             current_cursor = self.cursor;
         }
 
-        for error in errors {
+        for error in &errors {
             Report::build(
                 ariadne::ReportKind::Error,
                 self.source.name,
@@ -160,7 +160,8 @@ impl<'a> Parser<'a> {
             )
             .with_message("Parsing error".to_string())
             .with_label(
-                Label::new((self.source.name, error.span)).with_message(format!("{}", error.kind)),
+                Label::new((self.source.name, error.span.clone()))
+                    .with_message(format!("{}", error.kind)),
             )
             .finish()
             .print((
@@ -170,7 +171,7 @@ impl<'a> Parser<'a> {
             .unwrap();
         }
 
-        Ok(Program { declarations })
+        (Program { declarations }, errors)
     }
 
     fn parse_directive(&mut self) -> ParseResult<types::Declaration> {
@@ -496,7 +497,7 @@ impl<'a> Parser<'a> {
         if self.accept(Token::Schedule)?.is_some() {
             let task = self
                 .require(|t| matches!(t, Token::Ident(_)))?
-                .ok_or(self.error(ParseErrorKind::Any))?
+                .ok_or(self.error(ParseErrorKind::ExpectedExpression))?
                 .to_string();
 
             let mut args = vec![];
@@ -823,6 +824,13 @@ impl<'a> Parser<'a> {
                 snailquote::unescape(&val.to_string()).unwrap(),
             )));
         }
+        if let Some(Token::Char(c)) = self.accept(|t| matches!(t, Token::Char(_)))? {
+            let c = snailquote::unescape(&format!("\"{}\"", &c[1..c.len()]))
+                .map_err(|_| self.error(ParseErrorKind::BadCharacter))?;
+
+            let c = c.chars().next().unwrap();
+            return Ok(Some(Literal::Int(c as i64)));
+        }
         Ok(None)
     }
 
@@ -855,7 +863,11 @@ pub fn parse<'a, P: AsRef<Path>>(path: P) -> Program {
             contents: &source,
         },
     );
-    parser.parse().unwrap()
+    let (program, errors) = parser.parse();
+    if !errors.is_empty() {
+        std::process::exit(1);
+    }
+    program
 }
 
 pub fn resolve_directives(program: Program) -> Program {
