@@ -1,5 +1,5 @@
 use logos::Logos;
-use tbl_parser::{parse, resolve_directives, Parser, Source, Span, Token};
+use tbl_parser::{resolve_directives, Parser, Source, Span, Token};
 
 fn main() {
     let mut args = std::env::args();
