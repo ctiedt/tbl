@@ -1,4 +1,4 @@
-@using("examples/std.tbl");
+@using("lib/std.tbl");
 
 global n: u32 = 42;
 

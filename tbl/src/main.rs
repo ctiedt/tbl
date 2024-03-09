@@ -8,19 +8,13 @@ use cranelift::prelude::{
     Configurable,
 };
 use miette::IntoDiagnostic;
-use pest::Parser;
-use pest_derive::Parser;
+
 use tracing::error;
 use tracing_subscriber::FmtSubscriber;
 
-use parse::parse_program;
+use tbl_parser::{parse, resolve_directives};
 
 mod codegen;
-mod parse;
-
-#[derive(Parser)]
-#[grammar = "tbl.pest"]
-struct TblParser;
 
 #[derive(ArgParser)]
 #[command(author, version, about)]
@@ -95,11 +89,12 @@ fn link<S: AsRef<str>>(
                 "-l:crt1.o",
                 "-l:crti.o",
                 "-lc",
+                "-lreadline",
                 &obj_name,
                 "-l:crtn.o",
             ];
             args.extend(linked_objects.iter().map(|f| f.as_ref()));
-            std::process::Command::new("ld.lld")
+            std::process::Command::new("ld")
                 .args(args)
                 .spawn()
                 .into_diagnostic()?
@@ -149,18 +144,14 @@ https://github.com/ctiedt/tbl/issues/new?title=Compiler+Panic&body={}"#,
 fn main() -> miette::Result<()> {
     let args = Args::parse();
 
-    std::panic::set_hook(Box::new(report_compiler_panic));
+    if std::env::var("RUST_BACKTRACE").is_err() {
+        std::panic::set_hook(Box::new(report_compiler_panic));
+    }
 
     tracing::subscriber::set_global_default(FmtSubscriber::builder().pretty().finish())
         .into_diagnostic()?;
 
-    let source_file = std::fs::read_to_string(&args.file).into_diagnostic()?;
-    let parsed = TblParser::parse(Rule::program, &source_file)
-        .into_diagnostic()?
-        .next()
-        .unwrap();
-
-    let program = parse_program(parsed, &args.preprocessor)?;
+    let program = resolve_directives(parse(&args.file));
 
     let mut shared_builder = settings::builder();
     shared_builder.enable("is_pic").into_diagnostic()?;

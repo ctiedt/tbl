@@ -13,16 +13,15 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use miette::{miette, IntoDiagnostic};
 use tracing::info;
 
-use crate::{
-    codegen::context::StructMember,
-    parse::{
-        types::{
-            BinaryOperator, Declaration, Expression, ExternTaskParams, Literal, Program, Statement,
-            Type as TblType, UnaryOperator,
-        },
-        Location,
+use tbl_parser::{
+    types::{
+        BinaryOperator, Declaration, Expression, ExternTaskParams, Literal, Program, Statement,
+        Type as TblType, UnaryOperator,
     },
+    Location,
 };
+
+use crate::codegen::context::StructMember;
 
 use super::{
     context::{CodeGenContext, FunctionContext, GlobalContext, Symbol},
@@ -162,7 +161,7 @@ impl CodeGen {
                     func_builder.seal_block(fn_entry);
 
                     let locals_size = params.iter().map(|(_, p)| self.type_size(p)).sum::<u32>()
-                        + locals.iter().map(|l| self.type_size(&l.type_)).sum::<u32>();
+                        + locals.iter().map(|l| self.type_size(&l.1)).sum::<u32>();
                     let data = StackSlotData::new(StackSlotKind::ExplicitSlot, locals_size);
                     let locals_slot = func_builder.create_sized_stack_slot(data);
                     {
@@ -185,9 +184,9 @@ impl CodeGen {
                     }
 
                     for local in locals {
-                        let ty_size = self.type_size(&local.type_);
+                        let ty_size = self.type_size(&local.1);
                         let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
-                        fn_ctx.declare_local(&local.name, local.type_.clone(), ty_size)?;
+                        fn_ctx.declare_local(&local.0, local.1.clone(), ty_size)?;
                     }
 
                     for stmt in body {
@@ -199,6 +198,7 @@ impl CodeGen {
                         self.compile_stmt(&mut func_builder, &Statement::Return(None))?;
                     }
 
+                    func_builder.seal_all_blocks();
                     info!("{}", func_builder.func.display());
                     func_builder.finalize();
 
@@ -302,7 +302,7 @@ impl CodeGen {
             None,
             false,
             false,
-            Location { line: 0, column: 0 },
+            Location::default(),
         );
         let fn_name = UserFuncName::user(0, fn_idx as u32);
 
@@ -554,6 +554,19 @@ impl CodeGen {
                 let type_ = self.type_of(ctx, location).unwrap();
                 let loc = self.compile_lvalue(func_builder, location)?;
                 self.store_expr(func_builder, &type_, loc, 0, value)?;
+            }
+            Statement::Loop { body } => {
+                let block = func_builder.create_block();
+                func_builder.ins().jump(block, &[]);
+                func_builder.switch_to_block(block);
+                for stmt in body {
+                    self.compile_stmt(func_builder, stmt)?;
+                }
+                dbg!(block);
+                func_builder.ins().jump(block, &[]);
+                let next = func_builder.create_block();
+                func_builder.seal_block(next);
+                func_builder.switch_to_block(next);
             }
         }
         Ok(())

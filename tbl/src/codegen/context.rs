@@ -6,7 +6,7 @@ use cranelift::{
 };
 use cranelift_module::FuncId;
 
-use crate::parse::{
+use tbl_parser::{
     types::{Expression, Type as TblType},
     Location,
 };
