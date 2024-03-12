@@ -250,6 +250,9 @@ impl CodeGen {
                 Declaration::Directive { .. } => {
                     unreachable!("Directives are handled by the preprocessor")
                 }
+                Declaration::Use { module } => {
+                    todo!()
+                }
             }
         }
 

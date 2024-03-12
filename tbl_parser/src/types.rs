@@ -102,6 +102,9 @@ pub enum Declaration {
         name: String,
         args: Vec<Literal>,
     },
+    Use {
+        module: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

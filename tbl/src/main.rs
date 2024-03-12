@@ -9,12 +9,14 @@ use cranelift::prelude::{
 };
 use miette::IntoDiagnostic;
 
+use module::parse_module_hierarchy;
 use tracing::error;
 use tracing_subscriber::FmtSubscriber;
 
 use tbl_parser::{parse, resolve_directives};
 
 mod codegen;
+mod module;
 
 #[derive(ArgParser)]
 #[command(author, version, about)]
@@ -151,7 +153,12 @@ fn main() -> miette::Result<()> {
     tracing::subscriber::set_global_default(FmtSubscriber::builder().pretty().finish())
         .into_diagnostic()?;
 
-    let program = resolve_directives(parse(&args.file));
+    //    let (program, _) = parse(&args.file);
+    //  let program = resolve_directives(program);
+
+    let module = parse_module_hierarchy(&args.file, &[".", "lib"])?;
+    dbg!(&module);
+    let program = module.program;
 
     let mut shared_builder = settings::builder();
     shared_builder.enable("is_pic").into_diagnostic()?;

@@ -1,3 +1,10 @@
+task abc() {
+    printf("Hello world");
+    if n {
+        return 
+    }
+}
+
 task main() {
     //print("Hello world");
     8;
