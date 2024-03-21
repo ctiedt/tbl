@@ -6,7 +6,6 @@ pub mod types;
 use std::{ops::Range, path::Path};
 
 use crate::types::Statement;
-use ariadne::{Label, Report};
 use error::{ParseError, ParseErrorKind, ParseResult, ParseResultExt};
 use logos::Logos;
 use pattern::Pattern;
@@ -28,6 +27,34 @@ pub struct Location {
 pub struct Source<'a> {
     pub name: &'a str,
     pub contents: &'a str,
+}
+
+impl<'a> Source<'a> {
+    pub fn row_col(&self, span: Span) -> (Location, Location) {
+        let mut row = 0;
+        let mut col = 0;
+        for (idx, c) in self.contents.char_indices() {
+            if idx == span.start {
+                break;
+            }
+            col += 1;
+            if c == '\n' {
+                row += 1;
+                col = 0;
+            }
+        }
+
+        (
+            Location {
+                line: row,
+                column: col,
+            },
+            Location {
+                line: row,
+                column: col + span.count(),
+            },
+        )
+    }
 }
 
 pub struct Parser<'a> {
@@ -98,6 +125,28 @@ impl<'a> Parser<'a> {
                 }
             }
 
+            match self.parse_extern_global() {
+                Ok(Some(t)) => {
+                    declarations.push(t);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error.replace(e);
+                }
+            }
+
+            match self.parse_use() {
+                Ok(Some(t)) => {
+                    declarations.push(t);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error.replace(e);
+                }
+            }
+
             match self.parse_task() {
                 Ok(Some(t)) => {
                     declarations.push(t);
@@ -152,25 +201,6 @@ impl<'a> Parser<'a> {
             current_cursor = self.cursor;
         }
 
-        for error in &errors {
-            Report::build(
-                ariadne::ReportKind::Error,
-                self.source.name,
-                error.span.start,
-            )
-            .with_message("Parsing error".to_string())
-            .with_label(
-                Label::new((self.source.name, error.span.clone()))
-                    .with_message(format!("{}", error.kind)),
-            )
-            .finish()
-            .print((
-                self.source.name,
-                ariadne::Source::from(self.source.contents),
-            ))
-            .unwrap();
-        }
-
         (Program { declarations }, errors)
     }
 
@@ -201,6 +231,47 @@ impl<'a> Parser<'a> {
         self.require(Token::Semicolon)?;
 
         Ok(Some(Declaration::Directive { name, args }))
+    }
+
+    fn parse_use(&mut self) -> ParseResult<types::Declaration> {
+        if self.accept(Token::Use)?.is_none() {
+            return Ok(None);
+        }
+
+        let module = self
+            .require(|t| matches!(t, Token::Ident(_)))?
+            .ok_or(self.error(ParseErrorKind::ExpectedExpression))?
+            .to_string();
+
+        self.require(Token::Semicolon)?;
+
+        Ok(Some(Declaration::Use { module }))
+    }
+
+    fn parse_extern_global(&mut self) -> ParseResult<types::Declaration> {
+        if self.accept(Token::Extern)?.is_none() {
+            return Ok(None);
+        }
+
+        self.require(Token::Global)?;
+
+        let name = self
+            .require(|t| matches!(t, Token::Ident(_)))?
+            .ok_or(ParseError::new(
+                self.current_span(),
+                ParseErrorKind::UnexpectedToken,
+            ))?
+            .to_string();
+
+        self.require(Token::Colon)?;
+
+        let type_ = self
+            .parse_ty()?
+            .ok_or(self.error(ParseErrorKind::BadType))?;
+
+        self.require(Token::Semicolon)?;
+
+        Ok(Some(Declaration::ExternGlobal { name, type_ }))
     }
 
     fn parse_global(&mut self) -> ParseResult<types::Declaration> {
@@ -845,10 +916,18 @@ impl<'a> Parser<'a> {
     }
 }
 
-pub fn parse<'a, P: AsRef<Path>>(path: P) -> Program {
+pub fn parse_path<'a, P: AsRef<Path>>(path: P) -> (Program, Vec<ParseError>) {
     let path_str = path.as_ref().display().to_string();
-    let source = std::fs::read_to_string(path).unwrap();
-    let lexer = Token::lexer(&source);
+    let contents = std::fs::read_to_string(path).unwrap();
+    let source = Source {
+        name: &path_str,
+        contents: &contents,
+    };
+    parse(source)
+}
+
+pub fn parse(source: Source<'_>) -> (Program, Vec<ParseError>) {
+    let lexer = Token::lexer(&source.contents);
     let tokens: Result<Vec<(Token<'_>, Span)>, ()> = lexer
         .spanned()
         .map(|(t, s)| match t {
@@ -856,18 +935,9 @@ pub fn parse<'a, P: AsRef<Path>>(path: P) -> Program {
             Err(e) => Err(e),
         })
         .collect();
-    let mut parser = Parser::new(
-        tokens.unwrap(),
-        Source {
-            name: &path_str,
-            contents: &source,
-        },
-    );
+    let mut parser = Parser::new(tokens.unwrap(), source);
     let (program, errors) = parser.parse();
-    if !errors.is_empty() {
-        std::process::exit(1);
-    }
-    program
+    (program, errors)
 }
 
 pub fn resolve_directives(program: Program) -> Program {
@@ -879,7 +949,8 @@ pub fn resolve_directives(program: Program) -> Program {
                     let Literal::String(ref path) = args[0] else {
                         unreachable!()
                     };
-                    let inner = resolve_directives(parse(path));
+                    let (program, _) = parse_path(path);
+                    let inner = resolve_directives(program);
                     for decl in inner.declarations {
                         new_program.push(decl);
                     }

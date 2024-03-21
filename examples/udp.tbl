@@ -1,5 +1,5 @@
-@using("lib/std.tbl");
-@using("lib/socket.tbl");
+use std;
+use socket;
 
 task receive(sock: u32)
 <status: u32, buf: [u8; 64]>

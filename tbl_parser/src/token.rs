@@ -47,6 +47,9 @@ pub enum Token<'a> {
     #[token("as")]
     As,
 
+    #[token("use")]
+    Use,
+
     #[regex(r"([iu])(8|16|32|64)")]
     IntType(&'a str),
 
@@ -167,6 +170,7 @@ impl<'a> Display for Token<'a> {
                 Token::True => "true".to_string(),
                 Token::False => "false".to_string(),
                 Token::As => "as".to_string(),
+                Token::Use => "use".to_string(),
                 Token::IntType(t) => t.to_string(),
                 Token::Ident(id) => id.to_string(),
                 Token::Varargs => "...".to_string(),

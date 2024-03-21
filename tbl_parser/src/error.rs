@@ -1,11 +1,22 @@
 use crate::{Span, Token};
-use std::num::ParseIntError;
+use std::{fmt::Display, num::ParseIntError};
 use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub struct ParseError {
     pub span: Span,
+    #[source]
     pub kind: ParseErrorKind,
+}
+
+impl Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Error at {}..{}: {}",
+            self.span.start, self.span.end, self.kind
+        )
+    }
 }
 
 impl ParseError {

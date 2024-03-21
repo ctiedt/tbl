@@ -102,6 +102,13 @@ pub enum Declaration {
         name: String,
         args: Vec<Literal>,
     },
+    Use {
+        module: String,
+    },
+    ExternGlobal {
+        name: String,
+        type_: Type,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

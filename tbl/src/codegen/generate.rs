@@ -21,7 +21,7 @@ use tbl_parser::{
     Location,
 };
 
-use crate::codegen::context::StructMember;
+use crate::{codegen::context::StructMember, module::TblModule};
 
 use super::{
     context::{CodeGenContext, FunctionContext, GlobalContext, Symbol},
@@ -30,7 +30,6 @@ use super::{
 };
 
 pub struct CodeGen {
-    mod_name: String,
     obj_module: ObjectModule,
     config: Config,
     ctx: CodeGenContext,
@@ -50,7 +49,6 @@ impl CodeGen {
         )
         .into_diagnostic()?;
         Ok(Self {
-            mod_name,
             obj_module: ObjectModule::new(obj_builder),
             ctx: CodeGenContext::default(),
             config: config.clone(),
@@ -75,182 +73,16 @@ impl CodeGen {
         )
     }
 
-    pub fn compile(mut self, program: Program) -> miette::Result<()> {
-        for decl in &program.declarations {
-            match decl {
-                Declaration::ExternTask {
-                    name,
-                    params: args,
-                    returns,
-                } => {
-                    let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
-                    if let ExternTaskParams::WellKnown(args) = args {
-                        for (_, ty) in args {
-                            sig.params
-                                .push(AbiParam::new(self.to_cranelift_type(ty).unwrap()))
-                        }
-                    }
-                    if let Some(ret) = returns {
-                        sig.returns
-                            .push(AbiParam::new(self.to_cranelift_type(ret).unwrap()));
-                    }
-
-                    let id = self
-                        .obj_module
-                        .declare_function(name, cranelift_module::Linkage::Import, &sig)
-                        .into_diagnostic()?;
-
-                    let _fn_idx = self.insert_func(
-                        name,
-                        id,
-                        args.to_arg_vec(),
-                        returns.clone(),
-                        args.is_variadic(),
-                        true,
-                        Location::default(),
-                    );
-                }
-                Declaration::Task {
-                    location,
-                    name,
-                    params,
-                    returns,
-                    locals,
-                    body,
-                } => {
-                    let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
-                    for (_, ty) in params {
-                        sig.params
-                            .push(AbiParam::new(self.to_cranelift_type(ty).unwrap()))
-                    }
-                    if let Some(ret) = returns {
-                        sig.returns
-                            .push(AbiParam::new(self.to_cranelift_type(ret).unwrap()));
-                    }
-
-                    info!("{name}({:?}) -> {returns:?}", params);
-
-                    let name = match name.as_str() {
-                        "main" => "__main",
-                        other => other,
-                    };
-
-                    let func_id = self
-                        .obj_module
-                        .declare_function(name, cranelift_module::Linkage::Export, &sig)
-                        .into_diagnostic()?;
-
-                    let fn_idx = self.insert_func(
-                        name,
-                        func_id,
-                        params.to_vec(),
-                        returns.clone(),
-                        false,
-                        false,
-                        *location,
-                    );
-                    let fn_name = UserFuncName::user(0, fn_idx as u32);
-
-                    let mut func = Function::with_name_signature(fn_name, sig);
-                    let mut func_ctx = FunctionBuilderContext::new();
-                    let mut func_builder = FunctionBuilder::new(&mut func, &mut func_ctx);
-
-                    let fn_entry = func_builder.create_block();
-                    func_builder.append_block_params_for_function_params(fn_entry);
-                    func_builder.switch_to_block(fn_entry);
-                    func_builder.seal_block(fn_entry);
-
-                    let locals_size = params.iter().map(|(_, p)| self.type_size(p)).sum::<u32>()
-                        + locals.iter().map(|l| self.type_size(&l.1)).sum::<u32>();
-                    let data = StackSlotData::new(StackSlotKind::ExplicitSlot, locals_size);
-                    let locals_slot = func_builder.create_sized_stack_slot(data);
-                    {
-                        let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
-                        fn_ctx.init_locals(locals_slot);
-                    }
-
-                    for (idx, (arg, type_)) in params.iter().enumerate() {
-                        let params = func_builder.block_params(fn_entry);
-                        let param = params[idx];
-                        let ty_size = self.type_size(type_);
-                        let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
-                        fn_ctx.define_local(
-                            &mut func_builder,
-                            arg,
-                            type_.clone(),
-                            ty_size,
-                            param,
-                        )?;
-                    }
-
-                    for local in locals {
-                        let ty_size = self.type_size(&local.1);
-                        let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
-                        fn_ctx.declare_local(&local.0, local.1.clone(), ty_size)?;
-                    }
-
-                    for stmt in body {
-                        self.compile_stmt(&mut func_builder, stmt)?;
-                    }
-                    if body.last().is_none()
-                        || !matches!(body.last().unwrap(), Statement::Return(_))
-                    {
-                        self.compile_stmt(&mut func_builder, &Statement::Return(None))?;
-                    }
-
-                    func_builder.seal_all_blocks();
-                    info!("{}", func_builder.func.display());
-                    func_builder.finalize();
-
-                    let mut ctx = Context::for_function(func);
-
-                    ctx.compute_cfg();
-                    ctx.compute_domtree();
-                    ctx.verify(self.obj_module.isa()).into_diagnostic()?;
-                    ctx.dce(self.obj_module.isa()).into_diagnostic()?;
-                    ctx.eliminate_unreachable_code(self.obj_module.isa())
-                        .into_diagnostic()?;
-                    ctx.replace_redundant_loads().into_diagnostic()?;
-                    ctx.egraph_pass(self.obj_module.isa()).into_diagnostic()?;
-
-                    self.obj_module
-                        .define_function(func_id, &mut ctx)
-                        .into_diagnostic()?;
-
-                    let fn_ctx = self.ctx.functions.get(name).unwrap().clone();
-                    self.build_wrapper(name, fn_ctx)?;
-                }
-                Declaration::Struct { name, members } => self.ctx.create_struct_type(
-                    name,
-                    members,
-                    self.obj_module.isa().pointer_bytes() as usize,
-                ),
-
-                Declaration::Global { name, type_, value } => {
-                    let data_id = self
-                        .obj_module
-                        .declare_data(name, cranelift_module::Linkage::Export, true, false)
-                        .into_diagnostic()?;
-                    let mut data_desc = DataDescription::new();
-                    data_desc.init = Init::Zeros {
-                        size: self.type_size(type_) as usize,
-                    };
-                    self.obj_module
-                        .define_data(data_id, &data_desc)
-                        .into_diagnostic()?;
-                    self.ctx.globals.insert(
-                        name.into(),
-                        GlobalContext {
-                            id: data_id,
-                            type_: type_.clone(),
-                            initializer: value.clone(),
-                        },
-                    );
-                }
-                Declaration::Directive { .. } => {
-                    unreachable!("Directives are handled by the preprocessor")
-                }
+    pub fn compile(mut self, module: &TblModule) -> miette::Result<String> {
+        info!("Building module {}", module.name);
+        for dep in &module.dependencies {
+            for decl in dep.exports() {
+                self.compile_decl(&decl)?;
             }
+        }
+
+        for decl in &module.program.declarations {
+            self.compile_decl(decl)?;
         }
 
         if !self.config.compile_only {
@@ -263,10 +95,206 @@ impl CodeGen {
             self.dig.generate(&self.ctx, &mut res)?;
         }
 
-        let obj_name = format!("{}.o", self.mod_name.trim_end_matches(".tbl"));
-        let mut file = File::create(obj_name).into_diagnostic()?;
+        let obj_name = format!("{}.o", module.name);
+        let mut file = File::create(&obj_name).into_diagnostic()?;
         res.object.write_stream(&mut file).unwrap();
 
+        Ok(obj_name)
+    }
+
+    pub fn compile_decl(&mut self, decl: &Declaration) -> miette::Result<()> {
+        match decl {
+            Declaration::ExternTask {
+                name,
+                params: args,
+                returns,
+            } => {
+                let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
+                if let ExternTaskParams::WellKnown(args) = args {
+                    for (_, ty) in args {
+                        sig.params
+                            .push(AbiParam::new(self.to_cranelift_type(ty).unwrap()))
+                    }
+                }
+                if let Some(ret) = returns {
+                    sig.returns
+                        .push(AbiParam::new(self.to_cranelift_type(ret).unwrap()));
+                }
+
+                let id = self
+                    .obj_module
+                    .declare_function(name, cranelift_module::Linkage::Import, &sig)
+                    .into_diagnostic()?;
+
+                let _fn_idx = self.insert_func(
+                    name,
+                    id,
+                    args.to_arg_vec(),
+                    returns.clone(),
+                    args.is_variadic(),
+                    true,
+                    Location::default(),
+                );
+            }
+            Declaration::Task {
+                location,
+                name,
+                params,
+                returns,
+                locals,
+                body,
+            } => {
+                let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
+                for (_, ty) in params {
+                    sig.params
+                        .push(AbiParam::new(self.to_cranelift_type(ty).unwrap()))
+                }
+                if let Some(ret) = returns {
+                    sig.returns
+                        .push(AbiParam::new(self.to_cranelift_type(ret).unwrap()));
+                }
+
+                //info!("{name}({:?}) -> {returns:?}", params);
+
+                let name = match name.as_str() {
+                    "main" => "__main",
+                    other => other,
+                };
+
+                let func_id = self
+                    .obj_module
+                    .declare_function(name, cranelift_module::Linkage::Export, &sig)
+                    .into_diagnostic()?;
+
+                let fn_idx = self.insert_func(
+                    name,
+                    func_id,
+                    params.to_vec(),
+                    returns.clone(),
+                    false,
+                    false,
+                    *location,
+                );
+                let fn_name = UserFuncName::user(0, fn_idx as u32);
+
+                let mut func = Function::with_name_signature(fn_name, sig);
+                let mut func_ctx = FunctionBuilderContext::new();
+                let mut func_builder = FunctionBuilder::new(&mut func, &mut func_ctx);
+
+                let fn_entry = func_builder.create_block();
+                func_builder.append_block_params_for_function_params(fn_entry);
+                func_builder.switch_to_block(fn_entry);
+                func_builder.seal_block(fn_entry);
+
+                let locals_size = params.iter().map(|(_, p)| self.type_size(p)).sum::<u32>()
+                    + locals.iter().map(|l| self.type_size(&l.1)).sum::<u32>();
+                let data = StackSlotData::new(StackSlotKind::ExplicitSlot, locals_size);
+                let locals_slot = func_builder.create_sized_stack_slot(data);
+                {
+                    let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
+                    fn_ctx.init_locals(locals_slot);
+                }
+
+                for (idx, (arg, type_)) in params.iter().enumerate() {
+                    let params = func_builder.block_params(fn_entry);
+                    let param = params[idx];
+                    let ty_size = self.type_size(type_);
+                    let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
+                    fn_ctx.define_local(&mut func_builder, arg, type_.clone(), ty_size, param)?;
+                }
+
+                for local in locals {
+                    let ty_size = self.type_size(&local.1);
+                    let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
+                    fn_ctx.declare_local(&local.0, local.1.clone(), ty_size)?;
+                }
+
+                for stmt in body {
+                    self.compile_stmt(&mut func_builder, stmt)?;
+                }
+                if body.last().is_none() || !matches!(body.last().unwrap(), Statement::Return(_)) {
+                    self.compile_stmt(&mut func_builder, &Statement::Return(None))?;
+                }
+
+                func_builder.seal_all_blocks();
+                //info!("{}", func_builder.func.display());
+                func_builder.finalize();
+
+                let mut ctx = Context::for_function(func);
+
+                ctx.compute_cfg();
+                ctx.compute_domtree();
+                ctx.verify(self.obj_module.isa()).into_diagnostic()?;
+                ctx.dce(self.obj_module.isa()).into_diagnostic()?;
+                ctx.eliminate_unreachable_code(self.obj_module.isa())
+                    .into_diagnostic()?;
+                ctx.replace_redundant_loads().into_diagnostic()?;
+                ctx.egraph_pass(self.obj_module.isa()).into_diagnostic()?;
+
+                self.obj_module
+                    .define_function(func_id, &mut ctx)
+                    .into_diagnostic()?;
+
+                let fn_ctx = self.ctx.functions.get(name).unwrap().clone();
+                self.build_wrapper(name, fn_ctx)?;
+            }
+            Declaration::Struct { name, members } => self.ctx.create_struct_type(
+                name,
+                members,
+                self.obj_module.isa().pointer_bytes() as usize,
+            ),
+
+            Declaration::Global { name, type_, value } => {
+                let data_id = self
+                    .obj_module
+                    .declare_data(name, cranelift_module::Linkage::Export, true, false)
+                    .into_diagnostic()?;
+                let mut data_desc = DataDescription::new();
+                match value {
+                    Expression::Literal(Literal::Int(i)) => {
+                        let bytes = i.to_le_bytes();
+                        data_desc.init = Init::Bytes {
+                            contents: Box::new(bytes),
+                        }
+                    }
+                    _ => {
+                        data_desc.init = Init::Zeros {
+                            size: self.type_size(type_) as usize,
+                        };
+                    }
+                }
+                self.obj_module
+                    .define_data(data_id, &data_desc)
+                    .into_diagnostic()?;
+                self.ctx.globals.insert(
+                    name.into(),
+                    GlobalContext {
+                        id: data_id,
+                        type_: type_.clone(),
+                        initializer: Some(value.clone()),
+                    },
+                );
+            }
+            Declaration::ExternGlobal { name, type_ } => {
+                let data_id = self
+                    .obj_module
+                    .declare_data(name, cranelift_module::Linkage::Import, true, false)
+                    .into_diagnostic()?;
+
+                self.ctx.globals.insert(
+                    name.into(),
+                    GlobalContext {
+                        id: data_id,
+                        type_: type_.clone(),
+                        initializer: None,
+                    },
+                );
+            }
+            Declaration::Directive { .. } => {
+                unreachable!("Directives are handled by the preprocessor")
+            }
+            Declaration::Use { .. } => {}
+        }
         Ok(())
     }
 
@@ -338,8 +366,8 @@ impl CodeGen {
         func_builder.ins().call(wrapped_func, &args);
         func_builder.ins().return_(&[]);
 
-        info!("{func_name}");
-        info!("{}", func_builder.func.display());
+        //info!("{func_name}");
+        //info!("{}", func_builder.func.display());
         func_builder.finalize();
 
         let mut ctx = Context::for_function(func);
@@ -380,19 +408,15 @@ impl CodeGen {
 
         let globals = self.ctx.globals.clone();
         for global in globals.values() {
-            let data = self
-                .obj_module
-                .declare_data_in_func(global.id, func_builder.func);
-            let addr = func_builder
-                .ins()
-                .global_value(self.obj_module.isa().pointer_type(), data);
-            self.store_expr(
-                &mut func_builder,
-                &global.type_,
-                addr,
-                0,
-                &global.initializer,
-            )?;
+            if let Some(init) = &global.initializer {
+                let data = self
+                    .obj_module
+                    .declare_data_in_func(global.id, func_builder.func);
+                let addr = func_builder
+                    .ins()
+                    .global_value(self.obj_module.isa().pointer_type(), data);
+                self.store_expr(&mut func_builder, &global.type_, addr, 0, init)?;
+            }
         }
 
         let main_ctx = self.ctx.functions.get("__main").unwrap();
@@ -420,7 +444,7 @@ impl CodeGen {
 
         func_builder.ins().return_(&[main_ret]);
 
-        info!("{}", func.display());
+        //info!("{}", func.display());
 
         let mut ctx = Context::for_function(func);
         self.obj_module
@@ -562,7 +586,6 @@ impl CodeGen {
                 for stmt in body {
                     self.compile_stmt(func_builder, stmt)?;
                 }
-                dbg!(block);
                 func_builder.ins().jump(block, &[]);
                 let next = func_builder.create_block();
                 func_builder.seal_block(next);

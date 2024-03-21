@@ -1,20 +1,23 @@
-use std::{backtrace::Backtrace, panic::PanicInfo, path::PathBuf};
+use std::{panic::PanicInfo, path::PathBuf, sync::Arc};
 
 use clap::Parser as ArgParser;
 use codegen::{CodeGen, Config};
-use cranelift::prelude::{
-    isa::lookup,
-    settings::{self, Flags},
-    Configurable,
+use cranelift::{
+    codegen::isa::TargetIsa,
+    prelude::{
+        isa::lookup,
+        settings::{self, Flags},
+        Configurable,
+    },
 };
 use miette::IntoDiagnostic;
 
+use module::{parse_module_hierarchy, TblModule};
 use tracing::error;
 use tracing_subscriber::FmtSubscriber;
 
-use tbl_parser::{parse, resolve_directives};
-
 mod codegen;
+mod module;
 
 #[derive(ArgParser)]
 #[command(author, version, about)]
@@ -54,6 +57,7 @@ fn host_target() -> TargetPlatform {
 fn link<S: AsRef<str>>(
     file: &str,
     target: TargetPlatform,
+    objects: &[S],
     linked_objects: &[S],
 ) -> miette::Result<()> {
     let elf_name = file.trim_end_matches(".tbl");
@@ -90,10 +94,12 @@ fn link<S: AsRef<str>>(
                 "-l:crti.o",
                 "-lc",
                 "-lreadline",
-                &obj_name,
-                "-l:crtn.o",
+                //&obj_name,
+                //"-l:crtn.o",
             ];
+            args.extend(objects.iter().map(|f| f.as_ref()));
             args.extend(linked_objects.iter().map(|f| f.as_ref()));
+            args.extend(&["-l:crtn.o"]);
             std::process::Command::new("ld")
                 .args(args)
                 .spawn()
@@ -106,12 +112,6 @@ fn link<S: AsRef<str>>(
 }
 
 fn report_compiler_panic(info: &PanicInfo) {
-    if std::env::var("RUST_BACKTRACE").is_ok() {
-        let bt = Backtrace::capture();
-        //let trace = bt.frames().iter().map(|f| format!("{f:?}", f.)).join("\n");
-        error!("{bt:?}");
-    }
-
     let commit_hash = match std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()
@@ -141,6 +141,23 @@ https://github.com/ctiedt/tbl/issues/new?title=Compiler+Panic&body={}"#,
     );
 }
 
+fn compile_module(
+    module: &TblModule,
+    target: Arc<dyn TargetIsa>,
+    config: Config,
+) -> miette::Result<Vec<String>> {
+    let mut modules = vec![];
+    for dep in &module.dependencies {
+        let mut cfg = config.clone();
+        cfg.compile_only = true;
+        let output = compile_module(dep, target.clone(), cfg)?;
+        modules.extend(output);
+    }
+    let codegen = CodeGen::new(module.name.clone(), target, config)?;
+    modules.push(codegen.compile(module)?);
+    Ok(modules)
+}
+
 fn main() -> miette::Result<()> {
     let args = Args::parse();
 
@@ -151,7 +168,7 @@ fn main() -> miette::Result<()> {
     tracing::subscriber::set_global_default(FmtSubscriber::builder().pretty().finish())
         .into_diagnostic()?;
 
-    let program = resolve_directives(parse(&args.file));
+    let module = parse_module_hierarchy(&args.file, &[".", "lib"]).into_diagnostic()?;
 
     let mut shared_builder = settings::builder();
     shared_builder.enable("is_pic").into_diagnostic()?;
@@ -173,11 +190,16 @@ fn main() -> miette::Result<()> {
         filename: args.file,
         link_target: host_target(),
     };
-    let codegen = CodeGen::new(mod_name.clone(), target, config)?;
-    codegen.compile(program)?;
+
+    let outputs = compile_module(&module, target, config)?;
     if !args.compile_only {
         let link_target = host_target();
-        link(&mod_name, link_target, args.linked_objects.as_slice())?;
+        link(
+            &mod_name,
+            link_target,
+            &outputs,
+            args.linked_objects.as_slice(),
+        )?;
     }
     Ok(())
 }
