@@ -105,6 +105,10 @@ pub enum Declaration {
     Use {
         module: String,
     },
+    ExternGlobal {
+        name: String,
+        type_: Type,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

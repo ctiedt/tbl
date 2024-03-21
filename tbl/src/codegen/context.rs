@@ -251,5 +251,5 @@ impl Locals {
 pub struct GlobalContext {
     pub id: cranelift_module::DataId,
     pub type_: TblType,
-    pub initializer: Expression,
+    pub initializer: Option<Expression>,
 }

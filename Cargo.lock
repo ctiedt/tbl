@@ -1109,6 +1109,7 @@ checksum = "69758bda2e78f098e4ccb393021a0963bb3442eac05f135c30f61b7370bbafae"
 name = "tbl"
 version = "0.1.0"
 dependencies = [
+ "ariadne",
  "clap",
  "cranelift",
  "cranelift-module",
