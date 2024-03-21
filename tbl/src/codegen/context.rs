@@ -8,7 +8,7 @@ use cranelift_module::FuncId;
 
 use tbl_parser::{
     types::{Expression, Type as TblType},
-    Location,
+    Location, Span,
 };
 
 #[derive(Default)]
@@ -145,7 +145,7 @@ pub struct FunctionContext {
     pub func_id: FuncId,
     pub is_variadic: bool,
     pub is_external: bool,
-    pub location: Location,
+    pub span: Span,
 }
 
 impl FunctionContext {
@@ -155,7 +155,7 @@ impl FunctionContext {
         returns: Option<TblType>,
         is_variadic: bool,
         is_external: bool,
-        location: Location,
+        span: Span,
     ) -> Self {
         Self {
             params,
@@ -164,7 +164,7 @@ impl FunctionContext {
             func_id: id,
             is_variadic,
             is_external,
-            location,
+            span,
         }
     }
 

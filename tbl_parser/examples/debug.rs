@@ -1,5 +1,5 @@
 use logos::Logos;
-use tbl_parser::{resolve_directives, Parser, Source, Span, Token};
+use tbl_parser::{Parser, Source, Span, Token};
 
 fn main() {
     let mut args = std::env::args();
@@ -24,6 +24,5 @@ fn main() {
         },
     );
     let (program, _) = parser.parse();
-    let program = resolve_directives(program);
     dbg!(program);
 }

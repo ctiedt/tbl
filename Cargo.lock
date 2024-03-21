@@ -1125,9 +1125,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tbl_analysis"
+version = "0.1.0"
+dependencies = [
+ "tbl_parser",
+]
+
+[[package]]
 name = "tbl_lsp"
 version = "0.1.0"
 dependencies = [
+ "tbl_analysis",
  "tbl_parser",
  "tokio",
  "tower-lsp",

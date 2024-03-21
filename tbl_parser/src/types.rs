@@ -1,4 +1,4 @@
-use super::Location;
+use crate::Span;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Program {
@@ -75,14 +75,19 @@ impl ExternTaskParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Declaration {
+pub struct Declaration {
+    pub span: Span,
+    pub kind: DeclarationKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeclarationKind {
     ExternTask {
         name: String,
         params: ExternTaskParams,
         returns: Option<Type>,
     },
     Task {
-        location: Location,
         name: String,
         params: Vec<(String, Type)>,
         returns: Option<Type>,
@@ -111,6 +116,12 @@ pub enum Declaration {
     },
 }
 
+impl DeclarationKind {
+    pub fn with_span(self, span: Span) -> Declaration {
+        Declaration { span, kind: self }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Local {
     pub name: String,
@@ -118,7 +129,13 @@ pub struct Local {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Statement {
+pub struct Statement {
+    pub span: Span,
+    pub kind: StatementKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StatementKind {
     Conditional {
         test: Expression,
         then: Vec<Statement>,
@@ -140,8 +157,65 @@ pub enum Statement {
     },
 }
 
+impl StatementKind {
+    pub fn with_span(self, span: Span) -> Statement {
+        Statement { span, kind: self }
+    }
+}
+
+impl Statement {
+    pub fn referenced_vars(&self) -> Vec<(&str, Span)> {
+        match &self.kind {
+            StatementKind::Conditional { test, then, else_ } => {
+                let mut vars = test.referenced_vars();
+                for stmt in then {
+                    vars.extend(stmt.referenced_vars());
+                }
+                for stmt in else_ {
+                    vars.extend(stmt.referenced_vars());
+                }
+                vars
+            }
+            StatementKind::Exit => vec![],
+            StatementKind::Expression(e) => e.referenced_vars(),
+            StatementKind::Return(v) => {
+                if let Some(v) = v {
+                    v.referenced_vars()
+                } else {
+                    vec![]
+                }
+            }
+            StatementKind::Schedule { args, .. } => {
+                let mut vars = vec![];
+                for arg in args {
+                    vars.extend(arg.referenced_vars());
+                }
+                vars
+            }
+            StatementKind::Assign { location, value } => {
+                let mut vars = location.referenced_vars();
+                vars.extend(value.referenced_vars());
+                vars
+            }
+            StatementKind::Loop { body } => {
+                let mut vars = vec![];
+                for stmt in body {
+                    vars.extend(stmt.referenced_vars());
+                }
+                vars
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Expression {
+pub struct Expression {
+    pub span: Span,
+    pub kind: ExpressionKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExpressionKind {
     Literal(Literal),
     Var(String),
     Call {
@@ -172,6 +246,38 @@ pub enum Expression {
     SizeOf {
         value: Type,
     },
+}
+
+impl ExpressionKind {
+    pub fn with_span(self, span: Span) -> Expression {
+        Expression { span, kind: self }
+    }
+}
+
+impl Expression {
+    pub fn referenced_vars(&self) -> Vec<(&str, Span)> {
+        match &self.kind {
+            ExpressionKind::Literal(_) => vec![],
+            ExpressionKind::Var(v) => vec![(v, self.span.clone())],
+            ExpressionKind::Call { task, args } => {
+                let mut vars = task.referenced_vars();
+                for arg in args {
+                    vars.extend(arg.referenced_vars());
+                }
+                vars
+            }
+            ExpressionKind::BinaryOperation { left, right, .. } => {
+                let mut vars = left.referenced_vars();
+                vars.extend(right.referenced_vars());
+                vars
+            }
+            ExpressionKind::UnaryOperation { value, .. } => value.referenced_vars(),
+            ExpressionKind::StructAccess { value, .. } => value.referenced_vars(),
+            ExpressionKind::Cast { value, .. } => value.referenced_vars(),
+            ExpressionKind::Index { value, .. } => value.referenced_vars(),
+            ExpressionKind::SizeOf { .. } => vec![],
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

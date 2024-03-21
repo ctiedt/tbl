@@ -12,12 +12,11 @@ use cranelift::{
 };
 use miette::IntoDiagnostic;
 
-use module::{parse_module_hierarchy, TblModule};
+use tbl_parser::module::{parse_module_hierarchy, TblModule};
 use tracing::error;
 use tracing_subscriber::FmtSubscriber;
 
 mod codegen;
-mod module;
 
 #[derive(ArgParser)]
 #[command(author, version, about)]

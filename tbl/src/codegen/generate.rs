@@ -14,14 +14,15 @@ use miette::{miette, IntoDiagnostic};
 use tracing::info;
 
 use tbl_parser::{
+    module::TblModule,
     types::{
-        BinaryOperator, Declaration, Expression, ExternTaskParams, Literal, Program, Statement,
-        Type as TblType, UnaryOperator,
+        BinaryOperator, Declaration, DeclarationKind, Expression, ExpressionKind, ExternTaskParams,
+        Literal, Statement, StatementKind, Type as TblType, UnaryOperator,
     },
-    Location,
+    Span,
 };
 
-use crate::{codegen::context::StructMember, module::TblModule};
+use crate::codegen::context::StructMember;
 
 use super::{
     context::{CodeGenContext, FunctionContext, GlobalContext, Symbol},
@@ -65,11 +66,11 @@ impl CodeGen {
         returns: Option<TblType>,
         is_variadic: bool,
         is_external: bool,
-        location: Location,
+        span: Span,
     ) -> usize {
         self.ctx.insert_function(
             name.to_string(),
-            FunctionContext::new(id, params, returns, is_variadic, is_external, location),
+            FunctionContext::new(id, params, returns, is_variadic, is_external, span),
         )
     }
 
@@ -103,8 +104,9 @@ impl CodeGen {
     }
 
     pub fn compile_decl(&mut self, decl: &Declaration) -> miette::Result<()> {
-        match decl {
-            Declaration::ExternTask {
+        let kind = &decl.kind;
+        match kind {
+            DeclarationKind::ExternTask {
                 name,
                 params: args,
                 returns,
@@ -133,11 +135,10 @@ impl CodeGen {
                     returns.clone(),
                     args.is_variadic(),
                     true,
-                    Location::default(),
+                    decl.span.clone(),
                 );
             }
-            Declaration::Task {
-                location,
+            DeclarationKind::Task {
                 name,
                 params,
                 returns,
@@ -173,7 +174,7 @@ impl CodeGen {
                     returns.clone(),
                     false,
                     false,
-                    *location,
+                    decl.span.clone(),
                 );
                 let fn_name = UserFuncName::user(0, fn_idx as u32);
 
@@ -212,8 +213,13 @@ impl CodeGen {
                 for stmt in body {
                     self.compile_stmt(&mut func_builder, stmt)?;
                 }
-                if body.last().is_none() || !matches!(body.last().unwrap(), Statement::Return(_)) {
-                    self.compile_stmt(&mut func_builder, &Statement::Return(None))?;
+                if body.last().is_none()
+                    || !matches!(body.last().unwrap().kind, StatementKind::Return(_))
+                {
+                    self.compile_stmt(
+                        &mut func_builder,
+                        &StatementKind::Return(None).with_span(0..0),
+                    )?;
                 }
 
                 func_builder.seal_all_blocks();
@@ -238,20 +244,20 @@ impl CodeGen {
                 let fn_ctx = self.ctx.functions.get(name).unwrap().clone();
                 self.build_wrapper(name, fn_ctx)?;
             }
-            Declaration::Struct { name, members } => self.ctx.create_struct_type(
+            DeclarationKind::Struct { name, members } => self.ctx.create_struct_type(
                 name,
                 members,
                 self.obj_module.isa().pointer_bytes() as usize,
             ),
 
-            Declaration::Global { name, type_, value } => {
+            DeclarationKind::Global { name, type_, value } => {
                 let data_id = self
                     .obj_module
                     .declare_data(name, cranelift_module::Linkage::Export, true, false)
                     .into_diagnostic()?;
                 let mut data_desc = DataDescription::new();
-                match value {
-                    Expression::Literal(Literal::Int(i)) => {
+                match &value.kind {
+                    ExpressionKind::Literal(Literal::Int(i)) => {
                         let bytes = i.to_le_bytes();
                         data_desc.init = Init::Bytes {
                             contents: Box::new(bytes),
@@ -275,7 +281,7 @@ impl CodeGen {
                     },
                 );
             }
-            Declaration::ExternGlobal { name, type_ } => {
+            DeclarationKind::ExternGlobal { name, type_ } => {
                 let data_id = self
                     .obj_module
                     .declare_data(name, cranelift_module::Linkage::Import, true, false)
@@ -290,10 +296,10 @@ impl CodeGen {
                     },
                 );
             }
-            Declaration::Directive { .. } => {
+            DeclarationKind::Directive { .. } => {
                 unreachable!("Directives are handled by the preprocessor")
             }
-            Declaration::Use { .. } => {}
+            DeclarationKind::Use { .. } => {}
         }
         Ok(())
     }
@@ -330,7 +336,7 @@ impl CodeGen {
             None,
             false,
             false,
-            Location::default(),
+            0..0,
         );
         let fn_name = UserFuncName::user(0, fn_idx as u32);
 
@@ -459,8 +465,8 @@ impl CodeGen {
         stmt: &Statement,
     ) -> miette::Result<()> {
         let fn_idx = func_builder.func.name.get_user().unwrap().index;
-        match stmt {
-            Statement::Conditional { test, then, else_ } => {
+        match &stmt.kind {
+            StatementKind::Conditional { test, then, else_ } => {
                 let then_block = func_builder.create_block();
                 let else_block = func_builder.create_block();
                 let after_block = func_builder.create_block();
@@ -483,7 +489,7 @@ impl CodeGen {
                     self.compile_stmt(func_builder, stmt)?;
                 }
                 if let Some(last) = then.last() {
-                    if !matches!(last, Statement::Return(_)) {
+                    if !matches!(last.kind, StatementKind::Return(_)) {
                         func_builder.ins().jump(after_block, &[]);
                     }
                 }
@@ -492,7 +498,7 @@ impl CodeGen {
                     self.compile_stmt(func_builder, stmt)?;
                 }
                 if let Some(last) = else_.last() {
-                    if !matches!(last, Statement::Return(_)) {
+                    if !matches!(last.kind, StatementKind::Return(_)) {
                         func_builder.ins().jump(after_block, &[]);
                     }
                 }
@@ -500,20 +506,21 @@ impl CodeGen {
                 func_builder.seal_block(after_block);
                 func_builder.switch_to_block(after_block);
             }
-            Statement::Exit => {
+            StatementKind::Exit => {
                 self.compile_expr(
                     func_builder,
                     None,
-                    &Expression::Call {
-                        task: Box::new(Expression::Var("sched_exit".into())),
+                    &ExpressionKind::Call {
+                        task: Box::new(ExpressionKind::Var("sched_exit".into()).with_span(0..0)),
                         args: vec![],
-                    },
+                    }
+                    .with_span(0..0),
                 )?;
             }
-            Statement::Expression(expr) => {
+            StatementKind::Expression(expr) => {
                 self.compile_expr(func_builder, None, expr)?;
             }
-            Statement::Return(v) => {
+            StatementKind::Return(v) => {
                 let ctx = self.ctx.func_by_idx(fn_idx as usize);
                 let mut return_values = vec![];
                 if let Some(expr) = v {
@@ -525,7 +532,7 @@ impl CodeGen {
                 }
                 func_builder.ins().return_(&return_values);
             }
-            Statement::Schedule { task, args } => {
+            StatementKind::Schedule { task, args } => {
                 let ty_name = format!("__{task}_args");
                 let arg_ty = self.ctx.types.get(&ty_name).unwrap().clone();
                 let arg_tbl_ty = TblType::Named(ty_name.clone());
@@ -573,13 +580,13 @@ impl CodeGen {
                     .ins()
                     .call(sched_enqueue, &[called_task_addr, addr, args_size]);
             }
-            Statement::Assign { location, value } => {
+            StatementKind::Assign { location, value } => {
                 let ctx = self.ctx.func_by_idx(fn_idx as usize);
                 let type_ = self.type_of(ctx, location).unwrap();
                 let loc = self.compile_lvalue(func_builder, location)?;
                 self.store_expr(func_builder, &type_, loc, 0, value)?;
             }
-            Statement::Loop { body } => {
+            StatementKind::Loop { body } => {
                 let block = func_builder.create_block();
                 func_builder.ins().jump(block, &[]);
                 func_builder.switch_to_block(block);
@@ -604,8 +611,8 @@ impl CodeGen {
         value: &Expression,
     ) -> miette::Result<()> {
         match type_ {
-            TblType::Named(name) => match value {
-                Expression::Literal(Literal::Struct(members)) => {
+            TblType::Named(name) => match &value.kind {
+                ExpressionKind::Literal(Literal::Struct(members)) => {
                     let struct_ty = self.ctx.types[name].clone();
 
                     for (member, expr) in members {
@@ -622,7 +629,10 @@ impl CodeGen {
                     }
                 }
                 expr => {
-                    let src = self.compile_lvalue(func_builder, expr)?;
+                    let src = self.compile_lvalue(
+                        func_builder,
+                        &expr.clone().with_span(value.span.clone()),
+                    )?;
                     let addr = func_builder.ins().iadd_imm(addr, offset as i64);
                     let size = func_builder
                         .ins()
@@ -630,8 +640,8 @@ impl CodeGen {
                     func_builder.call_memcpy(self.obj_module.target_config(), addr, src, size);
                 }
             },
-            TblType::Array { item, length } => match value {
-                Expression::Literal(Literal::Array(values)) => {
+            TblType::Array { item, length } => match &value.kind {
+                ExpressionKind::Literal(Literal::Array(values)) => {
                     let item_size = self.type_size(item);
                     for (idx, value) in values.iter().enumerate() {
                         self.store_expr(
@@ -644,7 +654,10 @@ impl CodeGen {
                     }
                 }
                 expr => {
-                    let src = self.compile_lvalue(func_builder, expr)?;
+                    let src = self.compile_lvalue(
+                        func_builder,
+                        &expr.clone().with_span(value.span.clone()),
+                    )?;
                     let addr = func_builder.ins().iadd_imm(addr, offset as i64);
                     let size = func_builder.ins().iconst(types::I64, *length as i64);
                     func_builder.call_memcpy(self.obj_module.target_config(), addr, src, size);
@@ -667,8 +680,8 @@ impl CodeGen {
         expr: &Expression,
     ) -> miette::Result<Value> {
         let fn_idx = builder.func.name.get_user().unwrap().index;
-        match expr {
-            Expression::Literal(literal) => match literal {
+        match &expr.kind {
+            ExpressionKind::Literal(literal) => match literal {
                 Literal::Int(i) => {
                     if let Some(type_hint) = type_hint {
                         let ty = self.to_cranelift_type(&type_hint).unwrap();
@@ -710,7 +723,7 @@ impl CodeGen {
                     unimplemented!()
                 }
             },
-            Expression::Var(v) => {
+            ExpressionKind::Var(v) => {
                 let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                 match self
                     .ctx
@@ -751,8 +764,8 @@ impl CodeGen {
                     }
                 }
             }
-            Expression::Call { task, args } => match &**task {
-                Expression::Var(task_name) => match self.ctx.functions.get(task_name) {
+            ExpressionKind::Call { task, args } => match &task.kind {
+                ExpressionKind::Var(task_name) => match self.ctx.functions.get(task_name) {
                     Some(func_ctx) => {
                         let func = self
                             .obj_module
@@ -851,7 +864,8 @@ impl CodeGen {
                         ));
                     }
 
-                    let callee = self.compile_lvalue(builder, expr)?;
+                    let callee =
+                        self.compile_lvalue(builder, &expr.clone().with_span(task.span.clone()))?;
                     let mut arg_vals = vec![];
                     for arg in args {
                         let arg_val = self.compile_expr(builder, None, arg)?;
@@ -868,7 +882,7 @@ impl CodeGen {
                     }
                 }
             },
-            Expression::BinaryOperation {
+            ExpressionKind::BinaryOperation {
                 left,
                 right,
                 operator,
@@ -917,7 +931,7 @@ impl CodeGen {
                     BinaryOperator::Divide => Ok(builder.ins().sdiv(left, right)),
                 }
             }
-            Expression::UnaryOperation { value, operator } => {
+            ExpressionKind::UnaryOperation { value, operator } => {
                 if matches!(operator, UnaryOperator::Reference) {
                     return self.compile_lvalue(builder, value);
                 }
@@ -937,7 +951,7 @@ impl CodeGen {
                     }
                 }
             }
-            Expression::StructAccess { value, member } => {
+            ExpressionKind::StructAccess { value, member } => {
                 let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                 let ty_name = self.type_of(ctx, value).unwrap().name();
                 let ty = &self.ctx.types[&ty_name];
@@ -958,7 +972,7 @@ impl CodeGen {
                     .to_cranelift_type(ty.member_ty(ty.member_idx(member)))
                     .ok_or(miette!("Cannot convert TBL type to cranelift type"))?;
 
-                let Expression::Var(ref val) = **value else {
+                let ExpressionKind::Var(ref val) = &value.kind else {
                     unreachable!()
                 };
 
@@ -992,7 +1006,7 @@ impl CodeGen {
                     }
                 }
             }
-            Expression::Cast { value, to } => {
+            ExpressionKind::Cast { value, to } => {
                 let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                 let current_ty = self
                     .type_of(ctx, value)
@@ -1023,7 +1037,7 @@ impl CodeGen {
                     _ => unimplemented!(),
                 }
             }
-            Expression::Index { value, at } => {
+            ExpressionKind::Index { value, at } => {
                 let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                 let ty = self.type_of(ctx, value).unwrap();
                 let TblType::Array { item, .. } = ty else {
@@ -1048,7 +1062,7 @@ impl CodeGen {
                     Offset32::new(0),
                 ))
             }
-            Expression::SizeOf { value } => Ok(builder.ins().iconst(
+            ExpressionKind::SizeOf { value } => Ok(builder.ins().iconst(
                 self.obj_module.isa().pointer_type(),
                 self.type_size(value) as i64,
             )),
@@ -1062,8 +1076,8 @@ impl CodeGen {
     ) -> miette::Result<Value> {
         let fn_idx = builder.func.name.get_user().unwrap().index;
         let ctx = self.ctx.func_by_idx(fn_idx as usize).clone();
-        match expr {
-            Expression::Var(v) => {
+        match &expr.kind {
+            ExpressionKind::Var(v) => {
                 match self
                     .ctx
                     .resolve_name(&ctx, v)
@@ -1088,7 +1102,7 @@ impl CodeGen {
                     }
                 }
             }
-            Expression::StructAccess { value, member } => {
+            ExpressionKind::StructAccess { value, member } => {
                 let ty = self.type_of(&ctx, value).unwrap();
                 let ty_members = &self.ctx.types[&ty.name()].members;
 
@@ -1111,14 +1125,14 @@ impl CodeGen {
                 );
                 Ok(builder.ins().iadd(lhs, offset_val))
             }
-            Expression::Index { value, at } => {
+            ExpressionKind::Index { value, at } => {
                 let TblType::Array { item, .. } = self.type_of(&ctx, value).unwrap() else {
                     panic!()
                 };
                 let addr = self.compile_lvalue(builder, value)?;
 
-                match &**at {
-                    Expression::Literal(Literal::Int(i)) => Ok(builder
+                match &at.kind {
+                    ExpressionKind::Literal(Literal::Int(i)) => Ok(builder
                         .ins()
                         .iadd_imm(addr, *i * self.type_size(&item) as i64)),
                     _ => {
@@ -1138,7 +1152,7 @@ impl CodeGen {
                     }
                 }
             }
-            Expression::UnaryOperation {
+            ExpressionKind::UnaryOperation {
                 value,
                 operator: UnaryOperator::Dereference,
             } => self.compile_expr(builder, self.type_of(&ctx, value), value),
@@ -1147,8 +1161,8 @@ impl CodeGen {
     }
 
     fn type_of(&self, ctx: &FunctionContext, value: &Expression) -> Option<TblType> {
-        match value {
-            Expression::Literal(l) => match l {
+        match &value.kind {
+            ExpressionKind::Literal(l) => match l {
                 Literal::Int(_) => None,
                 Literal::String(_) => Some(TblType::Pointer(Box::new(TblType::Integer {
                     signed: false,
@@ -1164,7 +1178,7 @@ impl CodeGen {
                     None => None,
                 },
             },
-            Expression::Var(v) => self.ctx.resolve_name(ctx, v).map(|r| match r {
+            ExpressionKind::Var(v) => self.ctx.resolve_name(ctx, v).map(|r| match r {
                 Symbol::Local(var) => var.type_.clone(),
                 Symbol::Function(fun) => TblType::TaskPtr {
                     params: fun.params.iter().map(|(_, ty)| ty.clone()).collect(),
@@ -1172,18 +1186,18 @@ impl CodeGen {
                 },
                 Symbol::Global(global) => global.type_.clone(),
             }),
-            Expression::Call { task, .. } => match &**task {
-                Expression::Var(t) => self.ctx.functions[t].returns.clone(),
+            ExpressionKind::Call { task, .. } => match &task.kind {
+                ExpressionKind::Var(t) => self.ctx.functions[t].returns.clone(),
                 _ => None,
             },
-            Expression::BinaryOperation { left, right, .. } => {
+            ExpressionKind::BinaryOperation { left, right, .. } => {
                 if let Some(ty) = self.type_of(ctx, left) {
                     Some(ty)
                 } else {
                     self.type_of(ctx, right)
                 }
             }
-            Expression::UnaryOperation { value, operator } => match operator {
+            ExpressionKind::UnaryOperation { value, operator } => match operator {
                 UnaryOperator::Dereference => {
                     if let TblType::Pointer(t) = self.type_of(ctx, value)? {
                         Some(*t)
@@ -1196,7 +1210,7 @@ impl CodeGen {
                     Some(TblType::Pointer(Box::new(self.type_of(ctx, value)?)))
                 }
             },
-            Expression::StructAccess { value, member } => {
+            ExpressionKind::StructAccess { value, member } => {
                 let struct_name = match self.type_of(ctx, value).unwrap() {
                     TblType::Named(n) => n,
                     t => unimplemented!("{t:?}"),
@@ -1205,15 +1219,15 @@ impl CodeGen {
                 let member_idx = struct_ty.member_idx(member);
                 Some(struct_ty.member_ty(member_idx).clone())
             }
-            Expression::Cast { to, .. } => Some(to.clone()),
-            Expression::Index { value, .. } => {
+            ExpressionKind::Cast { to, .. } => Some(to.clone()),
+            ExpressionKind::Index { value, .. } => {
                 let val_ty = self.type_of(ctx, value);
                 match val_ty {
                     Some(TblType::Array { item, .. }) => Some(*item),
                     _ => None,
                 }
             }
-            Expression::SizeOf { .. } => Some(TblType::Integer {
+            ExpressionKind::SizeOf { .. } => Some(TblType::Integer {
                 signed: false,
                 width: self.obj_module.isa().pointer_bits(),
             }),

@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["tbl", "tbl_lsp", "tbl_parser"]
+members = ["tbl", "tbl_analysis", "tbl_lsp", "tbl_parser"]
