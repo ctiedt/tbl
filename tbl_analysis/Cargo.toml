@@ -1,0 +1,7 @@
+[package]
+name = "tbl_analysis"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tbl_parser = { version = "0.1.0", path = "../tbl_parser" }
