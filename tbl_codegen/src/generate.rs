@@ -22,7 +22,7 @@ use tbl_parser::{
     Span,
 };
 
-use crate::codegen::context::StructMember;
+use crate::context::StructMember;
 
 use super::{
     context::{CodeGenContext, FunctionContext, GlobalContext, Symbol},

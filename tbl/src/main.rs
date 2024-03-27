@@ -1,9 +1,8 @@
 use std::{panic::PanicInfo, path::PathBuf, sync::Arc};
 
 use clap::Parser as ArgParser;
-use codegen::{CodeGen, Config};
 use cranelift::{
-    codegen::isa::TargetIsa,
+    codegen::isa::{lookup_by_name, TargetIsa},
     prelude::{
         isa::lookup,
         settings::{self, Flags},
@@ -11,25 +10,24 @@ use cranelift::{
     },
 };
 use miette::IntoDiagnostic;
+use tbl_codegen::{CodeGen, Config};
 
 use tbl_parser::module::{parse_module_hierarchy, TblModule};
 use tracing::error;
 use tracing_subscriber::FmtSubscriber;
 
-mod codegen;
-
 #[derive(ArgParser)]
 #[command(author, version, about)]
 struct Args {
-    /// Whether to include debug info
     #[arg(short = 'g', default_value_t = false)]
+    /// Whether to include debug info
     is_debug: bool,
     #[arg(short = 'c', default_value_t = false)]
     /// Whether to link the output with libc
     compile_only: bool,
-    #[arg(short, long, default_value = "preprocess.py")]
-    /// The preprocessor implementation to use
-    preprocessor: String,
+    #[arg(long)]
+    /// The target to compile for
+    target: Option<String>,
     /// Object files to link with
     #[arg(short)]
     linked_objects: Vec<String>,
@@ -172,10 +170,10 @@ fn main() -> miette::Result<()> {
     let mut shared_builder = settings::builder();
     shared_builder.enable("is_pic").into_diagnostic()?;
     let shared_flags = Flags::new(shared_builder);
-    let target = lookup(target_lexicon::DefaultToHost::default().0)
-        .into_diagnostic()?
-        .finish(shared_flags)
-        .into_diagnostic()?;
+    // let target = lookup(target_lexicon::DefaultToHost::default().0)
+    // .into_diagnostic()?
+    // .finish(shared_flags)
+    // .into_diagnostic()?;
 
     let mod_name = args
         .file
@@ -187,8 +185,15 @@ fn main() -> miette::Result<()> {
         is_debug: args.is_debug,
         compile_only: args.compile_only,
         filename: args.file,
-        link_target: host_target(),
     };
+
+    let target = match &args.target {
+        Some(t) => lookup_by_name(t),
+        None => lookup(target_lexicon::DefaultToHost::default().0),
+    }
+    .into_diagnostic()?
+    .finish(shared_flags)
+    .into_diagnostic()?;
 
     let outputs = compile_module(&module, target, config)?;
     if !args.compile_only {
