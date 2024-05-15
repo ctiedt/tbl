@@ -16,13 +16,14 @@ fn main() {
         })
         .collect();
 
-    let mut parser = Parser::new(
-        tokens.unwrap(),
-        Source {
-            name: &path,
-            contents: &source,
-        },
-    );
-    let (program, _) = parser.parse();
+    dbg!(&tokens);
+
+    let mut parser = Parser::new(tokens.unwrap());
+    let (program, errors) = parser.parse();
+
+    for e in errors {
+        println!("{e:?}");
+    }
+
     dbg!(program);
 }

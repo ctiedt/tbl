@@ -2,7 +2,7 @@ use crate::{Span, Token};
 use std::{fmt::Display, num::ParseIntError};
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub struct ParseError {
     pub span: Span,
     #[source]
@@ -25,7 +25,7 @@ impl ParseError {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum ParseErrorKind {
     #[error("malformed character")]
     BadCharacter,
@@ -47,6 +47,8 @@ pub enum ParseErrorKind {
     ExpectedExpression,
     #[error("bad integer value")]
     ParseIntError(#[from] ParseIntError),
+    #[error("expected identifier")]
+    ExpectedIdent,
 }
 
 pub type ParseResult<T> = Result<Option<T>, ParseError>;

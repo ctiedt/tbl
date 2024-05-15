@@ -1,6 +1,6 @@
 use tbl_analysis::{DiagnosticLevel, TblAnalyzer};
 use tbl_parser::module::parse_module_hierarchy;
-use tbl_parser::types::{Declaration, DeclarationKind, Program};
+use tbl_parser::types::{DeclarationKind, Program};
 use tbl_parser::Source;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
@@ -69,7 +69,7 @@ impl LanguageServer for Backend {
             contents: &params.content_changes[0].text,
         };
         let (_, errors) = tbl_parser::parse(source);
-        let prog = match parse_module_hierarchy(path, &[".", "lib"]) {
+        let (prog, _) = match parse_module_hierarchy(path, &[".", "lib"]) {
             Ok(prog) => prog,
             Err(e) => {
                 self.client

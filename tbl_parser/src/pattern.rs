@@ -48,3 +48,16 @@ where
         )
     }
 }
+
+#[derive(Copy, Clone)]
+pub struct IdentPattern;
+
+impl<'a> Pattern<Token<'a>> for IdentPattern {
+    fn accept(&self, t: Token<'a>) -> bool {
+        matches!(t, Token::Ident(_))
+    }
+
+    fn display(&self) -> String {
+        "<ident>".to_string()
+    }
+}

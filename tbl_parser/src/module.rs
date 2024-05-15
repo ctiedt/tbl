@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{
+    fmt::Display,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     error::ParseError,
@@ -7,7 +10,29 @@ use crate::{
 };
 
 #[derive(Debug, thiserror::Error)]
-pub enum ModuleError {
+pub struct ModuleError {
+    pub mod_path: PathBuf,
+    #[source]
+    pub kind: ModuleErrorKind,
+}
+
+impl Display for ModuleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl ModuleError {
+    pub fn path_does_not_exist(mod_path: PathBuf) -> Self {
+        Self {
+            mod_path,
+            kind: ModuleErrorKind::PathDoesNotExist,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ModuleErrorKind {
     #[error("path does not exist")]
     PathDoesNotExist,
     #[error("parse error")]
@@ -68,6 +93,13 @@ impl TblModule {
                     }
                     .with_span(span),
                 ),
+                DeclarationKind::Enum { name, variants } => exports.push(
+                    DeclarationKind::Enum {
+                        name: name.clone(),
+                        variants: variants.clone(),
+                    }
+                    .with_span(span),
+                ),
                 DeclarationKind::Global { name, type_, .. } => exports.push(
                     DeclarationKind::ExternGlobal {
                         name: name.clone(),
@@ -92,28 +124,41 @@ impl TblModule {
 pub fn parse_module_hierarchy<P: AsRef<Path>>(
     main_file: P,
     search_paths: &[&str],
-) -> Result<TblModule, ModuleError> {
+) -> Result<(TblModule, Vec<ModuleError>), ModuleError> {
     let name = main_file
         .as_ref()
         .file_stem()
-        .ok_or(ModuleError::PathDoesNotExist)?;
+        .ok_or(ModuleError::path_does_not_exist(
+            main_file.as_ref().to_owned(),
+        ))?;
+    let mut errors = vec![];
     let (program, errs) = parse_path(&main_file);
+    errors.extend(errs.iter().map(|e| ModuleError {
+        mod_path: main_file.as_ref().to_path_buf(),
+        kind: ModuleErrorKind::ParseError(e.clone()),
+    }));
+    // errors.append(&mut errs);
     let mut dependencies = vec![];
     for decl in &program.declarations {
         if let DeclarationKind::Use { module } = &decl.kind {
             let paths = search_paths.iter().map(|p| format!("{p}/{module}.tbl"));
             for p in paths {
                 if std::fs::File::open(&p).is_ok() {
-                    let submodule = parse_module_hierarchy(&p, search_paths)?;
+                    let (submodule, mut submodule_errors) =
+                        parse_module_hierarchy(&p, search_paths)?;
                     dependencies.push(submodule);
+                    errors.append(&mut submodule_errors);
                     break;
                 }
             }
         }
     }
-    Ok(TblModule {
-        name: name.to_string_lossy().to_string(),
-        program,
-        dependencies,
-    })
+    Ok((
+        TblModule {
+            name: name.to_string_lossy().to_string(),
+            program,
+            dependencies,
+        },
+        errors,
+    ))
 }

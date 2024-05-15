@@ -1,10 +1,6 @@
 use std::collections::HashSet;
 
-use tbl_parser::{
-    module::TblModule,
-    types::{DeclarationKind, Program},
-    Span,
-};
+use tbl_parser::{module::TblModule, types::DeclarationKind, Span};
 
 pub struct Diagnostic {
     pub span: Span,
@@ -30,6 +26,7 @@ impl TblAnalyzer {
     pub fn analyze(&self) -> Vec<Diagnostic> {
         let mut diagnostics = vec![];
         diagnostics.extend(self.unused_globals());
+        diagnostics.extend(self.unused_locals());
         diagnostics.extend(self.unknown_vars());
         diagnostics
     }
@@ -64,6 +61,30 @@ impl TblAnalyzer {
         diagnostics
     }
 
+    fn unused_locals(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = vec![];
+        let program = &self.program.program;
+        for decl in &program.declarations {
+            let mut referenced_vars = vec![];
+            if let DeclarationKind::Task { locals, body, .. } = &decl.kind {
+                for stmt in body {
+                    referenced_vars.extend(stmt.referenced_vars());
+                }
+                let ref_names: Vec<_> = referenced_vars.iter().map(|(name, _)| *name).collect();
+                for (local, _) in locals {
+                    if !ref_names.contains(&local.as_str()) {
+                        diagnostics.push(Diagnostic {
+                            span: decl.span.clone(),
+                            level: DiagnosticLevel::Warning,
+                            message: format!("Local `{local}` is never used"),
+                        })
+                    }
+                }
+            }
+        }
+        diagnostics
+    }
+
     fn unknown_vars(&self) -> Vec<Diagnostic> {
         let mut globals = vec![];
         let mut diagnostics = vec![];
@@ -75,6 +96,7 @@ impl TblAnalyzer {
                 DeclarationKind::ExternTask { name, .. } => Some(name.to_string()),
                 DeclarationKind::Task { name, .. } => Some(name.to_string()),
                 DeclarationKind::Struct { .. } => None,
+                DeclarationKind::Enum { .. } => None,
                 DeclarationKind::Global { name, .. } => Some(name.to_string()),
                 DeclarationKind::Directive { .. } | DeclarationKind::Use { .. } => None,
                 DeclarationKind::ExternGlobal { name, .. } => Some(name.to_string()),

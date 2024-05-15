@@ -98,6 +98,10 @@ pub enum DeclarationKind {
         name: String,
         members: Vec<(String, Type)>,
     },
+    Enum {
+        name: String,
+        variants: Vec<(String, Vec<(String, Type)>)>,
+    },
     Global {
         name: String,
         type_: Type,
@@ -155,6 +159,20 @@ pub enum StatementKind {
     Loop {
         body: Vec<Statement>,
     },
+    Block {
+        statements: Vec<Statement>,
+    },
+    Match {
+        value: Expression,
+        branches: Vec<(MatchPattern, Statement)>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MatchPattern {
+    Ident(String),
+    Expr(Expression),
+    Any,
 }
 
 impl StatementKind {
@@ -201,6 +219,20 @@ impl Statement {
                 let mut vars = vec![];
                 for stmt in body {
                     vars.extend(stmt.referenced_vars());
+                }
+                vars
+            }
+            StatementKind::Block { statements } => {
+                let mut vars = vec![];
+                for stmt in statements {
+                    vars.append(&mut stmt.referenced_vars());
+                }
+                vars
+            }
+            StatementKind::Match { value, branches } => {
+                let mut vars = value.referenced_vars();
+                for (_, stmt) in branches {
+                    vars.append(&mut stmt.referenced_vars());
                 }
                 vars
             }
@@ -311,4 +343,8 @@ pub enum Literal {
     Bool(bool),
     Struct(Vec<(String, Expression)>),
     Array(Vec<Expression>),
+    Enum {
+        variant: String,
+        members: Vec<(String, Expression)>,
+    },
 }

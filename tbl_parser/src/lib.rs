@@ -6,14 +6,14 @@ pub mod types;
 
 use std::{ops::Range, path::Path};
 
-use crate::types::Statement;
+use crate::{pattern::IdentPattern, types::Statement};
 use error::{ParseError, ParseErrorKind, ParseResult, ParseResultExt};
 use logos::Logos;
 use pattern::Pattern;
 pub use token::Token;
 use types::{
-    BinaryOperator, Declaration, DeclarationKind, Expression, ExpressionKind, ExternTaskParams,
-    Literal, Program, StatementKind, Type, UnaryOperator,
+    BinaryOperator, DeclarationKind, Expression, ExpressionKind, ExternTaskParams, Literal,
+    MatchPattern, Program, StatementKind, Type, UnaryOperator,
 };
 
 pub type Span = Range<usize>;
@@ -59,18 +59,13 @@ impl<'a> Source<'a> {
 }
 
 pub struct Parser<'a> {
-    source: Source<'a>,
     tokens: Vec<(Token<'a>, Span)>,
     cursor: usize,
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(tokens: Vec<(Token<'a>, Span)>, source: Source<'a>) -> Self {
-        Self {
-            source,
-            tokens,
-            cursor: 0,
-        }
+    pub fn new(tokens: Vec<(Token<'a>, Span)>) -> Self {
+        Self { tokens, cursor: 0 }
     }
 
     fn current(&self) -> Token<'a> {
@@ -182,6 +177,17 @@ impl<'a> Parser<'a> {
             }
 
             match self.parse_struct() {
+                Ok(Some(t)) => {
+                    declarations.push(t);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error.replace(e);
+                }
+            }
+
+            match self.parse_enum() {
                 Ok(Some(t)) => {
                     declarations.push(t);
                     continue;
@@ -324,31 +330,56 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
 
-        let name = self
-            .require(|t| matches!(t, Token::Ident(_)))?
-            .ok_or(self.error(ParseErrorKind::ExpectedExpression))?
-            .to_string();
+        let end = self.current_span().end;
 
-        let mut members = vec![];
-        self.require(Token::CurlyOpen)?;
-        let mut no_params = true;
-        let mut end = self.current_span().end;
-        while let Some(param) = self.parse_param()? {
-            no_params = false;
-            members.push(param);
-            if self.accept(Token::Comma)?.is_none() {
-                end = self.current_span().end;
-                self.require(Token::CurlyClose)?;
-            }
-        }
-        if no_params {
-            end = self.current_span().end;
-            self.require(Token::CurlyClose)?;
+        let (name, members) = self
+            .parse_struct_variant()?
+            .ok_or(self.error(ParseErrorKind::BadType))?;
+
+        if !matches!(self.tokens[self.cursor - 1].0, Token::CurlyClose) {
+            self.require(Token::Semicolon)?;
         }
 
         Ok(Some(
             DeclarationKind::Struct { name, members }.with_span(start..end),
         ))
+    }
+
+    fn parse_struct_variant(&mut self) -> ParseResult<(String, Vec<(String, Type)>)> {
+        let name = if let Some(n) = self.accept(IdentPattern)? {
+            n.to_string()
+        } else {
+            return Ok(None);
+        };
+
+        let mut members = vec![];
+        if self.accept(Token::CurlyOpen)?.is_some() {
+            let mut no_params = true;
+            while let Some(param) = self.parse_param()? {
+                no_params = false;
+                members.push(param);
+                if self.accept(Token::Comma)?.is_none() {
+                    self.require(Token::CurlyClose)?;
+                }
+            }
+            if no_params {
+                self.require(Token::CurlyClose)?;
+            }
+        } else if self.accept(Token::ParenOpen)?.is_some() {
+            let mut param_counter = 0;
+            while let Some(param) = self.parse_ty()? {
+                members.push((param_counter.to_string(), param));
+                param_counter += 1;
+                if self.accept(Token::Comma)?.is_none() {
+                    self.require(Token::ParenClose)?;
+                }
+            }
+            if param_counter == 0 {
+                self.require(Token::ParenClose)?;
+            }
+        }
+
+        Ok(Some((name, members)))
     }
 
     fn parse_extern_task(&mut self) -> ParseResult<types::Declaration> {
@@ -560,8 +591,21 @@ impl<'a> Parser<'a> {
 
     fn parse_stmt(&mut self) -> ParseResult<Statement> {
         let start = self.current_span().start;
+        if self.accept(Token::CurlyOpen)?.is_some() {
+            let mut statements = vec![];
+            while let Some(stmt) = self.parse_stmt()? {
+                statements.push(stmt);
+            }
+            self.require(Token::CurlyClose)?;
+            let end = self.current_span().end;
+            return Ok(Some(
+                StatementKind::Block { statements }.with_span(start..end),
+            ));
+        }
         if self.accept(Token::If)?.is_some() {
-            let test = self.parse_expr()?.unwrap();
+            let test = self
+                .parse_expr()?
+                .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
             self.require(Token::CurlyOpen)?;
             let mut then = vec![];
             let mut else_ = vec![];
@@ -590,6 +634,30 @@ impl<'a> Parser<'a> {
             self.require(Token::CurlyClose)?;
             let end = self.current_span().end;
             return Ok(Some(StatementKind::Loop { body }.with_span(start..end)));
+        }
+        if self.accept(Token::Match)?.is_some() {
+            let value = self
+                .parse_expr()?
+                .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
+            let mut branches = vec![];
+            self.require(Token::CurlyOpen)?;
+            loop {
+                let Some(pat) = self.parse_match_pattern()? else {
+                    break;
+                };
+                let Some(_) = self.require(Token::Arrow)? else {
+                    break;
+                };
+                let Some(stmt) = self.parse_stmt()? else {
+                    break;
+                };
+                branches.push((pat, stmt));
+            }
+            self.require(Token::CurlyClose)?;
+            let end = self.current_span().end;
+            return Ok(Some(
+                StatementKind::Match { value, branches }.with_span(start..end),
+            ));
         }
         if self.accept(Token::Return)?.is_some() {
             let ret_value = self.parse_expr()?;
@@ -649,6 +717,19 @@ impl<'a> Parser<'a> {
                     .with_span(start..end),
                 ));
             }
+        }
+        Ok(None)
+    }
+
+    fn parse_match_pattern(&mut self) -> ParseResult<MatchPattern> {
+        if let Some(pat) = self.accept(IdentPattern)? {
+            return Ok(Some(MatchPattern::Ident(pat.display())));
+        }
+        if self.accept(Token::Star)?.is_some() {
+            return Ok(Some(MatchPattern::Any));
+        }
+        if let Some(expr) = self.parse_expr()? {
+            return Ok(Some(MatchPattern::Expr(expr)));
         }
         Ok(None)
     }
@@ -946,23 +1027,23 @@ impl<'a> Parser<'a> {
         if let Some(n) = self.parse_int()? {
             return Ok(Some(Literal::Int(n as i64)));
         }
-        if self.accept(Token::CurlyOpen)?.is_some() {
-            let mut members = vec![];
-            let mut no_members = true;
-            while let Some(arg) = self.parse_member()? {
-                no_members = false;
-                members.push(arg);
-                if self.accept(Token::Comma)?.is_none() {
-                    self.require(Token::CurlyClose)?;
-                    break;
-                }
-            }
-            if no_members {
-                self.require(Token::CurlyClose)?;
-            }
+        // if self.accept(Token::CurlyOpen)?.is_some() {
+        //     let mut members = vec![];
+        //     let mut no_members = true;
+        //     while let Some(arg) = self.parse_member()? {
+        //         no_members = false;
+        //         members.push(arg);
+        //         if self.accept(Token::Comma)?.is_none() {
+        //             self.require(Token::CurlyClose)?;
+        //             break;
+        //         }
+        //     }
+        //     if no_members {
+        //         self.require(Token::CurlyClose)?;
+        //     }
 
-            return Ok(Some(Literal::Struct(members)));
-        }
+        //     return Ok(Some(Literal::Struct(members)));
+        // }
         if self.accept(Token::BracketOpen)?.is_some() {
             let mut items = vec![];
             let mut no_items = true;
@@ -979,6 +1060,11 @@ impl<'a> Parser<'a> {
 
             return Ok(Some(Literal::Array(items)));
         }
+
+        if let Some(struct_lit) = self.parse_struct_literal()? {
+            return Ok(Some(Literal::Struct(struct_lit)));
+        }
+
         if let Some(t) = self.accept(|t| matches!(t, Token::String(_)))? {
             let Token::String(val) = t else {
                 unreachable!()
@@ -995,6 +1081,50 @@ impl<'a> Parser<'a> {
             let c = c.chars().next().unwrap();
             return Ok(Some(Literal::Int(c as i64)));
         }
+        if self.accept(Token::Colon)?.is_some() {
+            let variant = self
+                .require(IdentPattern)?
+                .ok_or(self.error(ParseErrorKind::ExpectedIdent))?
+                .to_string();
+            let members = self.parse_struct_literal()?.unwrap_or_default();
+            return Ok(Some(Literal::Enum { variant, members }));
+        }
+        Ok(None)
+    }
+
+    fn parse_struct_literal(&mut self) -> ParseResult<Vec<(String, Expression)>> {
+        let mut members = vec![];
+        if self.accept(Token::CurlyOpen)?.is_some() {
+            let mut no_members = true;
+            while let Some(arg) = self.parse_member()? {
+                no_members = false;
+                members.push(arg);
+                if self.accept(Token::Comma)?.is_none() {
+                    self.require(Token::CurlyClose)?;
+                    break;
+                }
+            }
+            if no_members {
+                self.require(Token::CurlyClose)?;
+            }
+            return Ok(Some(members));
+        }
+        //// Tuple structs are difficult, because they look exactly like calls.
+        //// I can't be bothered to implement them properly right now.
+        // if self.accept(Token::ParenOpen)?.is_some() {
+        //     let mut param_counter = 0;
+        //     while let Some(param) = self.parse_expr()? {
+        //         members.push((param_counter.to_string(), param));
+        //         param_counter += 1;
+        //         if self.accept(Token::Comma)?.is_none() {
+        //             self.require(Token::ParenClose)?;
+        //         }
+        //     }
+        //     if param_counter == 0 {
+        //         self.require(Token::ParenClose)?;
+        //     }
+        //     return Ok(Some(members));
+        // }
         Ok(None)
     }
 
@@ -1006,6 +1136,32 @@ impl<'a> Parser<'a> {
             return Ok(Some(val));
         }
         Ok(None)
+    }
+
+    fn parse_enum(&mut self) -> ParseResult<types::Declaration> {
+        let start = self.current_span().start;
+        if self.accept(Token::Enum)?.is_none() {
+            return Ok(None);
+        }
+
+        let name = self
+            .require(IdentPattern)?
+            .ok_or(self.error(ParseErrorKind::ExpectedIdent))?
+            .to_string();
+
+        let mut variants = vec![];
+        self.require(Token::CurlyOpen)?;
+
+        while let Some(variant) = self.parse_struct_variant()? {
+            variants.push(variant);
+            self.require(Token::Comma)?;
+        }
+
+        self.require(Token::CurlyClose)?;
+        let end = self.current_span().end;
+        Ok(Some(
+            DeclarationKind::Enum { name, variants }.with_span(start..end),
+        ))
     }
 }
 
@@ -1028,7 +1184,7 @@ pub fn parse(source: Source<'_>) -> (Program, Vec<ParseError>) {
             Err(e) => Err(e),
         })
         .collect();
-    let mut parser = Parser::new(tokens.unwrap(), source);
+    let mut parser = Parser::new(tokens.unwrap());
     let (program, errors) = parser.parse();
     (program, errors)
 }

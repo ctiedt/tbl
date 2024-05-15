@@ -14,6 +14,9 @@ pub enum Token<'a> {
     #[token("struct")]
     Struct,
 
+    #[token("enum")]
+    Enum,
+
     #[token("extern")]
     Extern,
 
@@ -25,6 +28,9 @@ pub enum Token<'a> {
 
     #[token("loop")]
     Loop,
+
+    #[token("match")]
+    Match,
 
     #[token("break")]
     Break,
@@ -61,6 +67,9 @@ pub enum Token<'a> {
 
     #[token("->")]
     Arrow,
+
+    #[token("::")]
+    DoubleColon,
 
     #[token("==")]
     DoubleEqual,
@@ -159,10 +168,12 @@ impl<'a> Display for Token<'a> {
                 Token::Task => "task".to_string(),
                 Token::Global => "global".to_string(),
                 Token::Struct => "struct".to_string(),
+                Token::Enum => "enum".to_string(),
                 Token::Extern => "extern".to_string(),
                 Token::If => "if".to_string(),
                 Token::Else => "else".to_string(),
                 Token::Loop => "loop".to_string(),
+                Token::Match => "match".to_string(),
                 Token::Break => "break".to_string(),
                 Token::Schedule => "schedule".to_string(),
                 Token::Exit => "exit".to_string(),
@@ -175,6 +186,7 @@ impl<'a> Display for Token<'a> {
                 Token::Ident(id) => id.to_string(),
                 Token::Varargs => "...".to_string(),
                 Token::Arrow => "->".to_string(),
+                Token::DoubleColon => "::".to_string(),
                 Token::DoubleEqual => "==".to_string(),
                 Token::Unequal => "!=".to_string(),
                 Token::GreaterEqual => ">=".to_string(),

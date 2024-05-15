@@ -1,4 +1,4 @@
-use std::{fs::File, sync::Arc};
+use std::{collections::HashMap, fs::File, sync::Arc};
 
 use cranelift::{
     codegen::{
@@ -6,6 +6,7 @@ use cranelift::{
         isa::TargetIsa,
         Context,
     },
+    frontend::Switch,
     prelude::*,
 };
 use cranelift_module::{DataDescription, FuncId, Init, Module};
@@ -22,7 +23,7 @@ use tbl_parser::{
     Span,
 };
 
-use crate::context::StructMember;
+use crate::context::{StructMember, TypeContext};
 
 use super::{
     context::{CodeGenContext, FunctionContext, GlobalContext, Symbol},
@@ -223,7 +224,7 @@ impl CodeGen {
                 }
 
                 func_builder.seal_all_blocks();
-                //info!("{}", func_builder.func.display());
+                info!("{}", func_builder.func.display());
                 func_builder.finalize();
 
                 let mut ctx = Context::for_function(func);
@@ -247,6 +248,12 @@ impl CodeGen {
             DeclarationKind::Struct { name, members } => self.ctx.create_struct_type(
                 name,
                 members,
+                self.obj_module.isa().pointer_bytes() as usize,
+            ),
+
+            DeclarationKind::Enum { name, variants } => self.ctx.create_enum_type(
+                name,
+                variants,
                 self.obj_module.isa().pointer_bytes() as usize,
             ),
 
@@ -312,7 +319,7 @@ impl CodeGen {
             self.obj_module.isa().pointer_bytes() as usize,
         );
 
-        let params_ty = self.ctx.types[&params_name].clone();
+        let params_ty = self.ctx.types[&params_name].unwrap_struct().clone();
 
         let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
         sig.params.push(AbiParam::new(
@@ -534,7 +541,13 @@ impl CodeGen {
             }
             StatementKind::Schedule { task, args } => {
                 let ty_name = format!("__{task}_args");
-                let arg_ty = self.ctx.types.get(&ty_name).unwrap().clone();
+                let arg_ty = self
+                    .ctx
+                    .types
+                    .get(&ty_name)
+                    .unwrap()
+                    .unwrap_struct()
+                    .clone();
                 let arg_tbl_ty = TblType::Named(ty_name.clone());
                 let ty_size = self.type_size(&arg_tbl_ty);
 
@@ -598,6 +611,58 @@ impl CodeGen {
                 func_builder.seal_block(next);
                 func_builder.switch_to_block(next);
             }
+            StatementKind::Block { statements } => {
+                for stmt in statements {
+                    self.compile_stmt(func_builder, stmt)?;
+                }
+            }
+            StatementKind::Match { value, branches } => {
+                let ctx = &self.ctx.func_by_idx(fn_idx as usize);
+                let mut switch = Switch::new();
+                let ty = self.type_of(ctx, value).unwrap();
+                let TblType::Named(ty_name) = ty else {
+                    unreachable!()
+                };
+                let enum_ty = self.ctx.get_enum_type(&ty_name).unwrap().clone();
+                let then = func_builder.create_block();
+                let otherwise = func_builder.create_block();
+                let mut block_branches = HashMap::new();
+                for (pat, branch) in branches {
+                    match pat {
+                        tbl_parser::types::MatchPattern::Ident(id) => {
+                            let block = func_builder.create_block();
+                            let variant = enum_ty.variant_tag(&id);
+                            switch.set_entry(variant as u128, block);
+                            block_branches.insert(variant, branch);
+                        }
+                        tbl_parser::types::MatchPattern::Expr(_) => unimplemented!(),
+                        tbl_parser::types::MatchPattern::Any => {}
+                    }
+                }
+                let discriminant = self.compile_expr(func_builder, None, value)?;
+                let entries = switch.entries().clone();
+                switch.emit(func_builder, discriminant, otherwise);
+                for (pat, branch) in branches {
+                    match pat {
+                        tbl_parser::types::MatchPattern::Ident(id) => {
+                            let variant = enum_ty.variant_tag(id) as u128;
+                            let block = *entries.get(&variant).unwrap();
+                            func_builder.seal_block(block);
+                            func_builder.switch_to_block(block);
+                            self.compile_stmt(func_builder, branch)?;
+                            func_builder.ins().jump(then, &[]);
+                        }
+                        tbl_parser::types::MatchPattern::Expr(_) => unimplemented!(),
+                        tbl_parser::types::MatchPattern::Any => {
+                            func_builder.seal_block(otherwise);
+                            func_builder.switch_to_block(otherwise);
+                            self.compile_stmt(func_builder, branch)?;
+                            func_builder.ins().jump(then, &[]);
+                        }
+                    }
+                }
+                func_builder.switch_to_block(then);
+            }
         }
         Ok(())
     }
@@ -613,12 +678,33 @@ impl CodeGen {
         match type_ {
             TblType::Named(name) => match &value.kind {
                 ExpressionKind::Literal(Literal::Struct(members)) => {
-                    let struct_ty = self.ctx.types[name].clone();
+                    let struct_ty = self.ctx.types[name].unwrap_struct().clone();
 
                     for (member, expr) in members {
                         let member_idx = struct_ty.member_idx(member);
                         let member_offset = struct_ty.members[member_idx].offset;
                         let member_ty = &struct_ty.members[member_idx].type_;
+                        self.store_expr(
+                            func_builder,
+                            member_ty,
+                            addr,
+                            offset + member_offset as i32,
+                            expr,
+                        )?;
+                    }
+                }
+                ExpressionKind::Literal(Literal::Enum { variant, members }) => {
+                    let enum_ty = self.ctx.types[name].unwrap_enum().clone();
+                    let tag = func_builder
+                        .ins()
+                        .iconst(types::I8, enum_ty.variant_tag(&variant) as i64);
+                    func_builder.ins().store(MemFlags::new(), tag, addr, offset);
+
+                    let variant_ty = enum_ty.get_variant(variant).unwrap();
+                    for (member, expr) in members {
+                        let member_idx = variant_ty.member_idx(member);
+                        let member_offset = variant_ty.members[member_idx].offset;
+                        let member_ty = &variant_ty.members[member_idx].type_;
                         self.store_expr(
                             func_builder,
                             member_ty,
@@ -715,12 +801,11 @@ impl CodeGen {
                     true => Ok(builder.ins().iconst(types::I8, 1)),
                     false => Ok(builder.ins().iconst(types::I8, 0)),
                 },
-                Literal::Struct(_members) => {
-                    // Struct literals are weird. They are handled in the assignment of struct variables.
-                    unimplemented!()
-                }
-                Literal::Array(_) => {
-                    unimplemented!()
+                Literal::Struct(_) | Literal::Array(_) | Literal::Enum { .. } => {
+                    // Composite literals cannot be created "freestanding". They can only be used for assignments.
+                    Err(miette!(
+                        "Freestanding composite literal in illegal position"
+                    ))
                 }
             },
             ExpressionKind::Var(v) => {
@@ -954,7 +1039,7 @@ impl CodeGen {
             ExpressionKind::StructAccess { value, member } => {
                 let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                 let ty_name = self.type_of(ctx, value).unwrap().name();
-                let ty = &self.ctx.types[&ty_name];
+                let ty = &self.ctx.types[&ty_name].unwrap_struct();
 
                 let offset = ty
                     .members
@@ -1104,7 +1189,7 @@ impl CodeGen {
             }
             ExpressionKind::StructAccess { value, member } => {
                 let ty = self.type_of(&ctx, value).unwrap();
-                let ty_members = &self.ctx.types[&ty.name()].members;
+                let ty_members = &self.ctx.types[&ty.name()].unwrap_struct().members;
 
                 let offset = ty_members
                     .iter()
@@ -1170,6 +1255,7 @@ impl CodeGen {
                 }))),
                 Literal::Bool(_) => Some(TblType::Bool),
                 Literal::Struct(_) => None,
+                Literal::Enum { .. } => None,
                 Literal::Array(inner) => match inner.first() {
                     Some(first) => self.type_of(ctx, first).map(|ty| TblType::Array {
                         item: Box::new(ty),
@@ -1215,7 +1301,7 @@ impl CodeGen {
                     TblType::Named(n) => n,
                     t => unimplemented!("{t:?}"),
                 };
-                let struct_ty = &self.ctx.types[&struct_name];
+                let struct_ty = &self.ctx.types[&struct_name].unwrap_struct();
                 let member_idx = struct_ty.member_idx(member);
                 Some(struct_ty.member_ty(member_idx).clone())
             }
@@ -1245,16 +1331,24 @@ impl CodeGen {
             TblType::Integer { .. } => None,
             TblType::Array { .. } => Some(self.obj_module.target_config().pointer_type()),
             TblType::Pointer(_) => Some(self.obj_module.target_config().pointer_type()),
-            TblType::Named(_) => None,
+            TblType::Named(name) => match &self.ctx.types[name] {
+                TypeContext::Struct(_) => None,
+                TypeContext::Enum(_) => Some(types::I8),
+            },
             TblType::TaskPtr { .. } => Some(self.obj_module.target_config().pointer_type()),
         }
     }
 
     fn type_size(&self, type_: &TblType) -> u32 {
-        match type_ {
-            TblType::Array { item, length } => self.type_size(item) * (*length as u32),
-            TblType::Named(name) => self.ctx.types[name].size as u32,
-            t => self.to_cranelift_type(t).unwrap().bytes(),
-        }
+        self.ctx
+            .type_size(type_, self.obj_module.isa().pointer_bytes() as usize) as u32
+        // match type_ {
+        //     TblType::Array { item, length } => self.type_size(item) * (*length as u32),
+        //     TblType::Named(name) => self
+        //         .ctx
+        //         .type_size(type_, self.obj_module.isa().pointer_bytes() as usize)
+        //         as u32,
+        //     t => self.to_cranelift_type(t).unwrap().bytes(),
+        // }
     }
 }

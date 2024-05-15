@@ -8,12 +8,12 @@ use cranelift_module::FuncId;
 
 use tbl_parser::{
     types::{Expression, Type as TblType},
-    Location, Span,
+    Span,
 };
 
 #[derive(Default)]
 pub struct CodeGenContext {
-    pub types: HashMap<String, StructContext>,
+    pub types: HashMap<String, TypeContext>,
     pub functions: HashMap<String, FunctionContext>,
     pub globals: HashMap<String, GlobalContext>,
     func_indices: Vec<String>,
@@ -37,14 +37,27 @@ impl CodeGenContext {
             TblType::Integer { width, .. } => (width / 8) as usize,
             TblType::Array { item, length } => self.type_size(item, ptr_size) * (*length as usize),
             TblType::Pointer(_) => ptr_size,
-            TblType::Named(name) => {
-                let struct_ty = &self.types[name];
-                struct_ty
+            TblType::Named(name) => match &self.types[name] {
+                TypeContext::Struct(struct_ty) => struct_ty
                     .members
                     .iter()
                     .map(|m| self.type_size(&m.type_, ptr_size))
-                    .sum()
-            }
+                    .sum(),
+                TypeContext::Enum(enum_ty) => {
+                    enum_ty
+                        .variants
+                        .iter()
+                        .map(|(_, v)| {
+                            v.members
+                                .iter()
+                                .map(|m| self.type_size(&m.type_, ptr_size))
+                                .sum::<usize>()
+                        })
+                        .max()
+                        .unwrap()
+                        + 1
+                }
+            },
             TblType::TaskPtr { .. } => ptr_size,
         }
     }
@@ -65,6 +78,17 @@ impl CodeGenContext {
         members: &[(String, TblType)],
         ptr_size: usize,
     ) {
+        self.types.insert(
+            ty_name.to_string(),
+            TypeContext::Struct(self.create_anonymous_struct_type(members, ptr_size)),
+        );
+    }
+
+    fn create_anonymous_struct_type(
+        &self,
+        members: &[(String, TblType)],
+        ptr_size: usize,
+    ) -> StructContext {
         fn padding_needed_for(offset: usize, alignment: usize) -> usize {
             let misalignment = offset % alignment;
             if misalignment > 0 {
@@ -98,13 +122,35 @@ impl CodeGenContext {
             size += padding_needed_for(size, align);
         }
 
+        StructContext {
+            size,
+            members: layout,
+        }
+    }
+
+    pub fn create_enum_type(
+        &mut self,
+        ty_name: &str,
+        variants: &[(String, Vec<(String, TblType)>)],
+        ptr_size: usize,
+    ) {
+        let mut layout = vec![];
+        for (name, ty) in variants {
+            let variant = self.create_anonymous_struct_type(ty, ptr_size);
+            layout.push((name.clone(), variant));
+        }
+
         self.types.insert(
             ty_name.to_string(),
-            StructContext {
-                size,
-                members: layout,
-            },
+            TypeContext::Enum(EnumContext { variants: layout }),
         );
+    }
+
+    pub fn get_enum_type(&self, name: &str) -> Option<&EnumContext> {
+        match self.types.get(name)? {
+            TypeContext::Struct(_) => None,
+            TypeContext::Enum(t) => Some(t),
+        }
     }
 }
 
@@ -112,6 +158,28 @@ pub enum Symbol<'a> {
     Local(&'a Local),
     Function(&'a FunctionContext),
     Global(&'a GlobalContext),
+}
+
+#[derive(Clone, Debug)]
+pub enum TypeContext {
+    Struct(StructContext),
+    Enum(EnumContext),
+}
+
+impl TypeContext {
+    pub fn unwrap_struct(&self) -> &StructContext {
+        match self {
+            TypeContext::Struct(s) => s,
+            _ => panic!("Tried to unwrap non-struct type as struct"),
+        }
+    }
+
+    pub fn unwrap_enum(&self) -> &EnumContext {
+        match self {
+            TypeContext::Enum(e) => e,
+            _ => panic!("Tried to unwrap non-enum type as enum"),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -252,4 +320,33 @@ pub struct GlobalContext {
     pub id: cranelift_module::DataId,
     pub type_: TblType,
     pub initializer: Option<Expression>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumContext {
+    pub variants: Vec<(String, StructContext)>,
+}
+
+impl EnumContext {
+    pub fn variant_tag(&self, variant: &str) -> usize {
+        self.variants
+            .iter()
+            .enumerate()
+            .find(|(_, (v, _))| v == variant)
+            .map(|(idx, _)| idx)
+            .unwrap()
+    }
+
+    pub fn get_variant(&self, variant: &str) -> miette::Result<StructContext> {
+        self.variants
+            .iter()
+            .find_map(|(name, ctx)| {
+                if name == variant {
+                    Some(ctx.clone())
+                } else {
+                    None
+                }
+            })
+            .ok_or(miette::miette!("No variant named `{variant}`"))
+    }
 }

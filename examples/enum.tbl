@@ -1,0 +1,44 @@
+use std;
+
+struct Unit;
+
+struct Tuple(u32, u32);
+
+enum Number {
+	One,
+	Two,
+	Three,
+}
+
+enum Point {
+	TwoD {x: u32, y: u32},
+	ThreeD {x: u32, y: u32, z: u32},
+}
+
+task main() -> u32
+<n: Number, p: Point, t: Tuple>
+{
+	p = :TwoD {x: 0, y: 0};
+	n = :One;
+	printf("%d\n", n);
+	printf("%d\n", #Number);
+	printf("%d\n", #Point);
+	n = :Three;
+	printf("%d\n", n);
+	printf("%d\n", p);
+
+	match n {
+		One -> {
+			printf("n is one\n");
+		}
+		Two -> {
+			printf("n is two\n");
+		}
+		* -> {
+			printf("n is something else\n");
+		}
+	}
+
+	printf("After match\n");
+	return 0;
+}
