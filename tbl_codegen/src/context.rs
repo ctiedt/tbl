@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use cranelift::{
-    codegen::ir::{immediates::Offset32, InstBuilder, StackSlot, Value},
+    codegen::ir::{immediates::Offset32, Block, InstBuilder, StackSlot, Value},
     frontend::FunctionBuilder,
 };
 use cranelift_module::FuncId;
@@ -28,6 +28,10 @@ impl CodeGenContext {
 
     pub fn func_by_idx(&self, idx: usize) -> &FunctionContext {
         &self.functions[&self.func_indices[idx]]
+    }
+
+    pub fn func_by_idx_mut(&mut self, idx: usize) -> &mut FunctionContext {
+        self.functions.get_mut(&self.func_indices[idx]).unwrap()
     }
 
     pub fn type_size(&self, ty: &TblType, ptr_size: usize) -> usize {
@@ -214,6 +218,7 @@ pub struct FunctionContext {
     pub is_variadic: bool,
     pub is_external: bool,
     pub span: Span,
+    pub loop_labels: Vec<Block>,
 }
 
 impl FunctionContext {
@@ -233,6 +238,7 @@ impl FunctionContext {
             is_variadic,
             is_external,
             span,
+            loop_labels: vec![],
         }
     }
 

@@ -224,7 +224,7 @@ impl CodeGen {
                 }
 
                 func_builder.seal_all_blocks();
-                info!("{}", func_builder.func.display());
+                // info!("{}", func_builder.func.display());
                 func_builder.finalize();
 
                 let mut ctx = Context::for_function(func);
@@ -403,6 +403,9 @@ impl CodeGen {
 
     fn build_start(&mut self) -> miette::Result<()> {
         let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
+        sig.params.push(AbiParam::new(types::I32));
+        sig.params
+            .push(AbiParam::new(self.obj_module.isa().pointer_type()));
         sig.returns.push(AbiParam::new(types::I32));
         let func_id = self
             .obj_module
@@ -447,7 +450,12 @@ impl CodeGen {
             .obj_module
             .declare_func_in_func(sched_run_id, func_builder.func);
 
-        let main_inst = func_builder.ins().call(main_ref, &[]);
+        let mut params = vec![];
+        if !main_ctx.params.is_empty() {
+            params.extend(func_builder.block_params(fn_entry));
+        }
+
+        let main_inst = func_builder.ins().call(main_ref, &params);
         let main_ret = func_builder
             .inst_results(main_inst)
             .first()
@@ -496,7 +504,10 @@ impl CodeGen {
                     self.compile_stmt(func_builder, stmt)?;
                 }
                 if let Some(last) = then.last() {
-                    if !matches!(last.kind, StatementKind::Return(_)) {
+                    if !matches!(
+                        last.kind,
+                        StatementKind::Return(_) | StatementKind::Break | StatementKind::Exit
+                    ) {
                         func_builder.ins().jump(after_block, &[]);
                     }
                 }
@@ -603,11 +614,19 @@ impl CodeGen {
                 let block = func_builder.create_block();
                 func_builder.ins().jump(block, &[]);
                 func_builder.switch_to_block(block);
+                let next = func_builder.create_block();
+                {
+                    let ctx = self.ctx.func_by_idx_mut(fn_idx as usize);
+                    ctx.loop_labels.push(next);
+                }
                 for stmt in body {
                     self.compile_stmt(func_builder, stmt)?;
                 }
+                {
+                    let ctx = self.ctx.func_by_idx_mut(fn_idx as usize);
+                    ctx.loop_labels.pop().ok_or(miette!("Empty loop stack"))?;
+                }
                 func_builder.ins().jump(block, &[]);
-                let next = func_builder.create_block();
                 func_builder.seal_block(next);
                 func_builder.switch_to_block(next);
             }
@@ -662,6 +681,14 @@ impl CodeGen {
                     }
                 }
                 func_builder.switch_to_block(then);
+            }
+            StatementKind::Break => {
+                let ctx = self.ctx.func_by_idx(fn_idx as usize);
+                let block = ctx
+                    .loop_labels
+                    .last()
+                    .ok_or(miette!("No loop to break from"))?;
+                func_builder.ins().jump(*block, &[]);
             }
         }
         Ok(())
@@ -975,6 +1002,62 @@ impl CodeGen {
                 let ctx = &self.ctx.func_by_idx(fn_idx as usize);
                 let type_hint_left = self.type_of(ctx, left);
                 let type_hint_right = self.type_of(ctx, right);
+
+                // Pointer arithmetic
+                match (type_hint_left.clone(), type_hint_right.clone()) {
+                    (Some(TblType::Pointer(p)), Some(TblType::Integer { signed, width })) => {
+                        let left = self.compile_expr(builder, Some(TblType::Pointer(p)), left)?;
+                        let right = self.compile_expr(
+                            builder,
+                            Some(TblType::Integer { signed, width }),
+                            right,
+                        )?;
+                        let scale = builder.ins().iconst(
+                            self.obj_module.isa().pointer_type(),
+                            self.obj_module.isa().pointer_bytes() as i64,
+                        );
+                        let addend = builder.ins().imul(right, scale);
+                        return Ok(builder.ins().iadd(left, addend));
+                    }
+                    (Some(TblType::Integer { signed, width }), Some(TblType::Pointer(p))) => {
+                        let left = self.compile_expr(
+                            builder,
+                            Some(TblType::Integer { signed, width }),
+                            left,
+                        )?;
+                        let right = self.compile_expr(builder, Some(TblType::Pointer(p)), right)?;
+                        let scale = builder.ins().iconst(
+                            self.obj_module.isa().pointer_type(),
+                            self.obj_module.isa().pointer_bytes() as i64,
+                        );
+                        let addend = builder.ins().imul(left, scale);
+                        return Ok(builder.ins().iadd(addend, right));
+                    }
+                    (Some(TblType::Pointer(p)), None) => {
+                        let left =
+                            self.compile_expr(builder, Some(TblType::Pointer(p.clone())), left)?;
+                        let right = self.compile_expr(builder, Some(TblType::Pointer(p)), right)?;
+                        let scale = builder.ins().iconst(
+                            self.obj_module.isa().pointer_type(),
+                            self.obj_module.isa().pointer_bytes() as i64,
+                        );
+                        let addend = builder.ins().imul(right, scale);
+                        return Ok(builder.ins().iadd(left, addend));
+                    }
+                    (None, Some(TblType::Pointer(p))) => {
+                        let left =
+                            self.compile_expr(builder, Some(TblType::Pointer(p.clone())), left)?;
+                        let right = self.compile_expr(builder, Some(TblType::Pointer(p)), right)?;
+                        let scale = builder.ins().iconst(
+                            self.obj_module.isa().pointer_type(),
+                            self.obj_module.isa().pointer_bytes() as i64,
+                        );
+                        let addend = builder.ins().imul(left, scale);
+                        return Ok(builder.ins().iadd(addend, right));
+                    }
+                    _ => {}
+                }
+
                 let th = match (type_hint_left, type_hint_right) {
                     (None, None) => type_hint,
                     (Some(l), None) => Some(l),
@@ -1119,7 +1202,28 @@ impl CodeGen {
                     (TblType::Array { .. }, TblType::Pointer(_)) => {
                         self.compile_lvalue(builder, value)
                     }
-                    _ => unimplemented!(),
+                    (
+                        TblType::Pointer(_),
+                        TblType::Integer {
+                            signed: false,
+                            width,
+                        },
+                    ) => self.compile_expr(
+                        builder,
+                        Some(TblType::Integer {
+                            signed: false,
+                            width,
+                        }),
+                        value,
+                    ),
+                    (
+                        TblType::Integer {
+                            signed: false,
+                            width,
+                        },
+                        TblType::Pointer(p),
+                    ) => self.compile_expr(builder, Some(TblType::Pointer(p)), value),
+                    (t1, t2) => Err(miette!("Cannot cast from {t1:?} to {t2:?}")),
                 }
             }
             ExpressionKind::Index { value, at } => {

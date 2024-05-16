@@ -166,6 +166,7 @@ pub enum StatementKind {
         value: Expression,
         branches: Vec<(MatchPattern, Statement)>,
     },
+    Break,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -236,6 +237,7 @@ impl Statement {
                 }
                 vars
             }
+            StatementKind::Break => vec![],
         }
     }
 }

@@ -1,0 +1,14 @@
+use std;
+
+task main()
+<n: u32>
+{
+	n = 0;
+	loop {
+		printf("%d\n", n);
+		n = n + 1;
+		if n == 5 {
+			break;
+		}
+	}
+}

@@ -160,11 +160,6 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            println!(
-                "Trying to parse task @ {} ({:?})",
-                self.current(),
-                self.current_span()
-            );
             match self.parse_task() {
                 Ok(Some(t)) => {
                     declarations.push(t);
@@ -285,12 +280,6 @@ impl<'a> Parser<'a> {
 
     fn parse_extern_global(&mut self) -> ParseResult<types::Declaration> {
         let start = self.current_span().start;
-        // if self.accept(Token::Extern)?.is_none() {
-        //     return Ok(None);
-        // }
-
-        // self.require(Token::Global)?;
-
         if self
             .accept_sequence(&[Token::Extern, Token::Global])?
             .is_none()
@@ -414,11 +403,6 @@ impl<'a> Parser<'a> {
     fn parse_extern_task(&mut self) -> ParseResult<types::Declaration> {
         let start = self.current_span().start;
         let mut returns = None;
-        // if self.accept(Token::Extern)?.is_none() {
-        //     return Ok(None);
-        // }
-        // self.require(Token::Task)
-        //     .error(ParseErrorKind::UnknownKeyword)?;
 
         if self
             .accept_sequence(&[Token::Extern, Token::Task])?
@@ -704,6 +688,11 @@ impl<'a> Parser<'a> {
             self.require(Token::Semicolon)?;
             let end = self.current_span().end;
             return Ok(Some(StatementKind::Exit.with_span(start..end)));
+        }
+        if self.accept(Token::Break)?.is_some() {
+            self.require(Token::Semicolon)?;
+            let end = self.current_span().end;
+            return Ok(Some(StatementKind::Break.with_span(start..end)));
         }
         if self.accept(Token::Schedule)?.is_some() {
             let task = self

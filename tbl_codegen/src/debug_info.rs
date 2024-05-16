@@ -172,6 +172,7 @@ impl DebugInfoGenerator {
         object: &mut ObjectProduct,
         ctx: &CodeGenContext,
     ) {
+        println!("Generating DI for {}", func.func_id);
         let root = self.dwarf.unit.root();
         let dwarf_fn = self.dwarf.unit.add(root, DW_TAG_subprogram);
 
