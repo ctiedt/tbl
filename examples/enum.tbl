@@ -36,6 +36,7 @@ task main() -> u32
 		}
 		* -> {
 			printf("n is something else\n");
+			printf("Actually, n is %d\n", n);
 		}
 	}
 

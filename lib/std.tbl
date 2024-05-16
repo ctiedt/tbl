@@ -1,13 +1,9 @@
 extern task memcpy(dest: &any, src: &any, n: u64);
+extern task memset(dest: &any, value: u32, n: u64);
 extern task printf(...);
 extern task putchar(c: u32);
 extern task malloc(size: u64) -> &any;
-//@cfg_platform("nt", "extern task Sleep(time: u32);");
-//@cfg_platform("posix", "extern task usleep(time: u32);");
 extern task usleep(time: u32);
-
-//@cfg_platform("nt", "task tbl_sleep(time: u32) {Sleep(time); return;}");
-//@cfg_platform("posix", "task tbl_sleep(time: u32) {usleep(time * 1000); return;}");
 
 task tbl_sleep(time: u32) {
     usleep(time * 1000); 

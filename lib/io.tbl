@@ -1,0 +1,7 @@
+global O_RDONLY: u32 = 0;
+global O_WRONLY: u32 = 1;
+global O_RDWR: u32 = 2;
+
+extern task open(path: &u8, flags: u32) -> u32;
+extern task read(fd: u32, buf: &u8, count: u64) -> u32;
+extern task write(fd: u32, buf: &u8, count: u64) -> u32;

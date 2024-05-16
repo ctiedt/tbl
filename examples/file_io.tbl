@@ -1,0 +1,13 @@
+use std;
+use io;
+
+task main()
+<fd: u32, bytes_read: u32, buf: [u8; 1024]>
+{
+	memset(buf as &u8, 0, 1024);
+	fd = open("examples/file_io.tbl", O_RDONLY);
+	bytes_read = read(fd, buf as &u8, 1024);
+	printf("Read %d bytes\n", bytes_read);
+	printf("%s\n", buf as &u8);
+	return;
+}

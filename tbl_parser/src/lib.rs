@@ -100,6 +100,23 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn accept_sequence(&mut self, p: &[impl Pattern<Token<'a>>]) -> ParseResult<Vec<Token<'a>>> {
+        let mut tokens = vec![];
+        for (idx, pat) in p.iter().enumerate() {
+            match self.accept(*pat) {
+                Ok(Some(t)) => {
+                    tokens.push(t);
+                }
+                Ok(None) => {
+                    self.cursor -= idx;
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(Some(tokens))
+    }
+
     fn error(&self, kind: ParseErrorKind) -> ParseError {
         ParseError::new(self.current_span(), kind)
     }
@@ -143,6 +160,11 @@ impl<'a> Parser<'a> {
                 }
             }
 
+            println!(
+                "Trying to parse task @ {} ({:?})",
+                self.current(),
+                self.current_span()
+            );
             match self.parse_task() {
                 Ok(Some(t)) => {
                     declarations.push(t);
@@ -263,11 +285,18 @@ impl<'a> Parser<'a> {
 
     fn parse_extern_global(&mut self) -> ParseResult<types::Declaration> {
         let start = self.current_span().start;
-        if self.accept(Token::Extern)?.is_none() {
+        // if self.accept(Token::Extern)?.is_none() {
+        //     return Ok(None);
+        // }
+
+        // self.require(Token::Global)?;
+
+        if self
+            .accept_sequence(&[Token::Extern, Token::Global])?
+            .is_none()
+        {
             return Ok(None);
         }
-
-        self.require(Token::Global)?;
 
         let name = self
             .require(|t| matches!(t, Token::Ident(_)))?
@@ -385,14 +414,21 @@ impl<'a> Parser<'a> {
     fn parse_extern_task(&mut self) -> ParseResult<types::Declaration> {
         let start = self.current_span().start;
         let mut returns = None;
-        if self.accept(Token::Extern)?.is_none() {
+        // if self.accept(Token::Extern)?.is_none() {
+        //     return Ok(None);
+        // }
+        // self.require(Token::Task)
+        //     .error(ParseErrorKind::UnknownKeyword)?;
+
+        if self
+            .accept_sequence(&[Token::Extern, Token::Task])?
+            .is_none()
+        {
             return Ok(None);
         }
-        self.require(Token::Task)
-            .error(ParseErrorKind::UnknownKeyword)?;
         let name = self
             .accept(|t| matches!(t, Token::Ident(_)))?
-            .unwrap()
+            .ok_or(self.error(ParseErrorKind::ExpectedIdent))?
             .to_string();
 
         let params = self
@@ -421,11 +457,10 @@ impl<'a> Parser<'a> {
         let mut params = vec![];
         let mut locals = vec![];
         let mut returns = None;
-        self.require(Token::Task)?;
-        let name = self
-            .require(|t| matches!(t, Token::Ident(_)))?
-            .unwrap()
-            .to_string();
+        if self.accept(Token::Task)?.is_none() {
+            return Ok(None);
+        }
+        let name = self.require(IdentPattern)?.unwrap().to_string();
 
         self.require(Token::ParenOpen)?;
         let mut no_params = true;
@@ -476,7 +511,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_param(&mut self) -> ParseResult<(String, Type)> {
-        if let Some(name) = self.accept(|t| matches!(t, Token::Ident(_)))? {
+        if let Some(name) = self.accept(IdentPattern)? {
             let name = name.to_string();
             self.require(Token::Colon)?;
             let ty = self
@@ -577,7 +612,7 @@ impl<'a> Parser<'a> {
             })?;
             return Ok(Some(Type::Integer { signed, width }));
         }
-        if let Some(res) = self.accept(|t| matches!(t, Token::Ident(_)))? {
+        if let Some(res) = self.accept(IdentPattern)? {
             return Ok(Some(Type::Named(res.to_string())));
         }
         if self.accept(Token::And)?.is_some() {
@@ -672,8 +707,8 @@ impl<'a> Parser<'a> {
         }
         if self.accept(Token::Schedule)?.is_some() {
             let task = self
-                .require(|t| matches!(t, Token::Ident(_)))?
-                .ok_or(self.error(ParseErrorKind::ExpectedExpression))?
+                .require(IdentPattern)?
+                .ok_or(self.error(ParseErrorKind::ExpectedIdent))?
                 .to_string();
 
             let mut args = vec![];
@@ -894,8 +929,8 @@ impl<'a> Parser<'a> {
         if let Some(value) = self.parse_primary()? {
             if self.accept(Token::Period)?.is_some() {
                 let member = self
-                    .require(|t| matches!(t, Token::Ident(_)))?
-                    .ok_or(self.error(ParseErrorKind::ExpectedExpression))?
+                    .require(IdentPattern)?
+                    .ok_or(self.error(ParseErrorKind::ExpectedIdent))?
                     .to_string();
                 let end = self.current_span().end;
                 return Ok(Some(
@@ -991,7 +1026,7 @@ impl<'a> Parser<'a> {
             let end = self.current_span().end;
             return Ok(Some(ExpressionKind::Literal(lit).with_span(start..end)));
         }
-        if let Some(n) = self.accept(|t| matches!(t, Token::Ident(_)))? {
+        if let Some(n) = self.accept(IdentPattern)? {
             let end = self.current_span().end;
             let Token::Ident(val) = n else { unreachable!() };
             return Ok(Some(
@@ -1004,7 +1039,7 @@ impl<'a> Parser<'a> {
 
     fn parse_member(&mut self) -> ParseResult<(String, Expression)> {
         let name = self
-            .require(|t| matches!(t, Token::Ident(_)))?
+            .require(IdentPattern)?
             .ok_or(self.error(ParseErrorKind::ExpectedExpression))?
             .to_string();
 
