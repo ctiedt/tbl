@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Debug};
 
 use cranelift::{
     codegen::ir::{immediates::Offset32, Block, InstBuilder, StackSlot, Value},
@@ -14,24 +14,44 @@ use tbl_parser::{
 #[derive(Default)]
 pub struct CodeGenContext {
     pub types: HashMap<String, TypeContext>,
-    pub functions: HashMap<String, FunctionContext>,
-    pub globals: HashMap<String, GlobalContext>,
-    func_indices: Vec<String>,
+    pub global_scope: Scope,
 }
 
 impl CodeGenContext {
-    pub fn insert_function(&mut self, name: String, function: FunctionContext) -> usize {
-        self.func_indices.push(name.clone());
-        self.functions.insert(name, function);
-        self.functions.len() - 1
+    pub fn insert_function(&mut self, name: String, function: FunctionContext) {
+        self.global_scope.insert_function(name, function);
     }
 
-    pub fn func_by_idx(&self, idx: usize) -> &FunctionContext {
-        &self.functions[&self.func_indices[idx]]
+    pub fn func_by_idx(&self, idx: u32) -> Option<&FunctionContext> {
+        self.global_scope.functions().find_map(|(_, f)| {
+            if f.func_id.as_u32() == idx {
+                Some(f)
+            } else {
+                None
+            }
+        })
     }
 
-    pub fn func_by_idx_mut(&mut self, idx: usize) -> &mut FunctionContext {
-        self.functions.get_mut(&self.func_indices[idx]).unwrap()
+    pub fn func_by_idx_mut(&mut self, idx: u32) -> Option<&mut FunctionContext> {
+        self.global_scope.functions_mut().find_map(|(_, f)| {
+            if f.func_id.as_u32() == idx {
+                Some(f)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn get_function(&self, name: &str) -> Option<&FunctionContext> {
+        self.global_scope
+            .functions()
+            .find_map(|(n, f)| if n == name { Some(f) } else { None })
+    }
+
+    pub fn get_function_mut(&mut self, name: &str) -> Option<&mut FunctionContext> {
+        self.global_scope
+            .functions_mut()
+            .find_map(|(n, f)| if n == name { Some(f) } else { None })
     }
 
     pub fn type_size(&self, ty: &TblType, ptr_size: usize) -> usize {
@@ -63,16 +83,6 @@ impl CodeGenContext {
                 }
             },
             TblType::TaskPtr { .. } => ptr_size,
-        }
-    }
-
-    pub fn resolve_name<'a>(&'a self, ctx: &'a FunctionContext, name: &str) -> Option<Symbol<'a>> {
-        match ctx.locals.as_ref().unwrap().find(name) {
-            Some(var) => Some(Symbol::Local(var)),
-            None => match self.globals.get(name) {
-                Some(global) => Some(Symbol::Global(global)),
-                None => self.functions.get(name).map(Symbol::Function),
-            },
         }
     }
 
@@ -158,10 +168,11 @@ impl CodeGenContext {
     }
 }
 
-pub enum Symbol<'a> {
-    Local(&'a Local),
-    Function(&'a FunctionContext),
-    Global(&'a GlobalContext),
+#[derive(Clone, Debug)]
+pub enum Symbol {
+    Local(Local),
+    Function(FunctionContext),
+    Global(GlobalContext),
 }
 
 #[derive(Clone, Debug)]
@@ -219,6 +230,7 @@ pub struct FunctionContext {
     pub is_external: bool,
     pub span: Span,
     pub loop_labels: Vec<Block>,
+    pub scope: Scope,
 }
 
 impl FunctionContext {
@@ -229,6 +241,7 @@ impl FunctionContext {
         is_variadic: bool,
         is_external: bool,
         span: Span,
+        parent: Scope,
     ) -> Self {
         Self {
             params,
@@ -239,6 +252,7 @@ impl FunctionContext {
             is_external,
             span,
             loop_labels: vec![],
+            scope: parent.create_child(),
         }
     }
 
@@ -251,13 +265,26 @@ impl FunctionContext {
     }
 
     pub fn declare_local(&mut self, name: &str, type_: TblType, size: u32) -> miette::Result<()> {
+        // match self.locals.as_mut() {
+        //     Some(locals) => {
+        //         locals.vars.push(Local {
+        //             name: name.to_string(),
+        //             type_,
+        //             size,
+        //         });
+        //         Ok(())
+        //     }
+        //     None => miette::bail!("Tried to insert locals into an external task"),
+        // }
         match self.locals.as_mut() {
             Some(locals) => {
-                locals.vars.push(Local {
+                let local = Local {
                     name: name.to_string(),
                     type_,
                     size,
-                });
+                };
+                self.scope.insert_local(name, local.clone());
+                locals.vars.push(local);
                 Ok(())
             }
             None => miette::bail!("Tried to insert locals into an external task"),
@@ -278,11 +305,13 @@ impl FunctionContext {
                 builder
                     .ins()
                     .stack_store(value, locals.slot, Offset32::new(idx as i32));
-                locals.vars.push(Local {
+                let local = Local {
                     name: name.to_string(),
                     type_,
                     size,
-                });
+                };
+                self.scope.insert_local(name, local.clone());
+                locals.vars.push(local);
                 Ok(())
             }
             None => miette::bail!("Tried to insert locals into an external task"),
@@ -354,5 +383,66 @@ impl EnumContext {
                 }
             })
             .ok_or(miette::miette!("No variant named `{variant}`"))
+    }
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct Scope {
+    parent: Option<Box<Scope>>,
+    variables: HashMap<String, Symbol>,
+}
+
+impl Scope {
+    pub fn create_child(&self) -> Self {
+        Scope {
+            parent: Some(Box::new(self.clone())),
+            ..Default::default()
+        }
+    }
+
+    pub fn get<S: AsRef<str>>(&self, key: S) -> Option<&Symbol> {
+        match self.variables.get(key.as_ref()) {
+            Some(value) => Some(value),
+            None => self.parent.as_ref().map(|p| p.get(key.as_ref())).flatten(),
+        }
+    }
+
+    pub fn insert(&mut self, key: impl Into<String>, value: Symbol) {
+        self.variables.insert(key.into(), value);
+    }
+
+    pub fn insert_global(&mut self, key: impl Into<String>, value: GlobalContext) {
+        self.variables.insert(key.into(), Symbol::Global(value));
+    }
+
+    pub fn insert_local(&mut self, key: impl Into<String>, value: Local) {
+        let key = key.into();
+        println!("Inserting local {}", key);
+        self.variables.insert(key.into(), Symbol::Local(value));
+    }
+
+    pub fn insert_function(&mut self, key: impl Into<String>, value: FunctionContext) {
+        self.variables.insert(key.into(), Symbol::Function(value));
+    }
+
+    pub fn functions(&self) -> impl Iterator<Item = (&str, &FunctionContext)> {
+        self.variables.iter().filter_map(|(n, v)| match v {
+            Symbol::Function(f) => Some((n.as_str(), f)),
+            _ => None,
+        })
+    }
+
+    pub fn functions_mut(&mut self) -> impl Iterator<Item = (&str, &mut FunctionContext)> {
+        self.variables.iter_mut().filter_map(|(n, v)| match v {
+            Symbol::Function(f) => Some((n.as_str(), f)),
+            _ => None,
+        })
+    }
+
+    pub fn globals(&self) -> impl Iterator<Item = (&str, &GlobalContext)> {
+        self.variables.iter().filter_map(|(n, v)| match v {
+            Symbol::Global(g) => Some((n.as_str(), g)),
+            _ => None,
+        })
     }
 }

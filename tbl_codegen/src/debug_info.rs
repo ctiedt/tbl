@@ -100,7 +100,7 @@ impl DebugInfoGenerator {
     ) -> miette::Result<()> {
         self.generate_primitive_types();
 
-        for func in ctx.functions.values() {
+        for (_, func) in ctx.global_scope.functions() {
             self.generate_function_di(func, object, ctx);
         }
 

@@ -13,7 +13,7 @@ use pattern::Pattern;
 pub use token::Token;
 use types::{
     BinaryOperator, DeclarationKind, Expression, ExpressionKind, ExternTaskParams, Literal,
-    MatchPattern, Program, StatementKind, Type, UnaryOperator,
+    MatchPattern, PostfixOperator, Program, StatementKind, Type, UnaryOperator,
 };
 
 pub type Span = Range<usize>;
@@ -768,7 +768,7 @@ impl<'a> Parser<'a> {
                     _ => unreachable!(),
                 };
                 let right = self
-                    .parse_comparison()?
+                    .parse_expr()?
                     .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
                 let end = self.current_span().end;
                 Ok(Some(
@@ -811,7 +811,7 @@ impl<'a> Parser<'a> {
                     _ => unreachable!(),
                 };
                 let right = self
-                    .parse_term()?
+                    .parse_comparison()?
                     .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
                 let end = self.current_span().end;
                 Ok(Some(
@@ -840,7 +840,7 @@ impl<'a> Parser<'a> {
                     _ => unreachable!(),
                 };
                 let right = self
-                    .parse_factor()?
+                    .parse_term()?
                     .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
                 let end = self.current_span().end;
                 Ok(Some(
@@ -869,7 +869,7 @@ impl<'a> Parser<'a> {
                     _ => unreachable!(),
                 };
                 let right = self
-                    .parse_unary()?
+                    .parse_factor()?
                     .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
                 let end = self.current_span().end;
                 Ok(Some(
@@ -915,76 +915,86 @@ impl<'a> Parser<'a> {
 
     fn parse_postfix(&mut self) -> ParseResult<Expression> {
         let start = self.current_span().start;
-        if let Some(value) = self.parse_primary()? {
-            if self.accept(Token::Period)?.is_some() {
-                let member = self
-                    .require(IdentPattern)?
-                    .ok_or(self.error(ParseErrorKind::ExpectedIdent))?
-                    .to_string();
-                let end = self.current_span().end;
-                return Ok(Some(
-                    ExpressionKind::StructAccess {
-                        value: Box::new(value),
-                        member,
-                    }
-                    .with_span(start..end),
-                ));
-            }
-            if self.accept(Token::BracketOpen)?.is_some() {
-                let index = self
-                    .parse_expr()?
-                    .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
-                self.require(Token::BracketClose)?;
-                let end = self.current_span().end;
-                return Ok(Some(
-                    ExpressionKind::Index {
-                        value: Box::new(value),
-                        at: Box::new(index),
-                    }
-                    .with_span(start..end),
-                ));
-            }
-            if self.accept(Token::As)?.is_some() {
-                let to = self
-                    .parse_ty()?
-                    .ok_or(self.error(ParseErrorKind::BadType))?;
-                let end = self.current_span().end;
-                return Ok(Some(
-                    ExpressionKind::Cast {
-                        value: Box::new(value),
-                        to,
-                    }
-                    .with_span(start..end),
-                ));
-            }
-            if self.accept(Token::ParenOpen)?.is_some() {
-                let mut args = vec![];
-                let mut no_args = true;
-                while let Some(arg) = self.parse_expr()? {
-                    no_args = false;
-                    args.push(arg);
-                    if self.accept(Token::Comma)?.is_none() {
-                        self.require(Token::ParenClose)?;
-                        break;
+        match self.parse_primary()? {
+            Some(mut value) => {
+                while let Some(pf) = self.parse_postfix_operator()? {
+                    let end = self.current_span().end;
+                    match pf {
+                        PostfixOperator::StructAccess { member } => {
+                            value = ExpressionKind::StructAccess {
+                                value: Box::new(value),
+                                member,
+                            }
+                            .with_span(start..end);
+                        }
+                        PostfixOperator::Index { at } => {
+                            value = ExpressionKind::Index {
+                                value: Box::new(value),
+                                at: Box::new(at),
+                            }
+                            .with_span(start..end);
+                        }
+                        PostfixOperator::Cast { to } => {
+                            value = ExpressionKind::Cast {
+                                value: Box::new(value),
+                                to,
+                            }
+                            .with_span(start..end);
+                        }
+                        PostfixOperator::Call { args } => {
+                            value = ExpressionKind::Call {
+                                task: Box::new(value),
+                                args,
+                            }
+                            .with_span(start..end);
+                        }
                     }
                 }
-                if no_args {
-                    self.require(Token::ParenClose)?;
-                }
-                let end = self.current_span().end;
-
-                return Ok(Some(
-                    ExpressionKind::Call {
-                        task: Box::new(value),
-                        args,
-                    }
-                    .with_span(start..end),
-                ));
+                Ok(Some(value))
             }
-            Ok(Some(value))
-        } else {
-            Ok(None)
+            None => Ok(None),
         }
+    }
+
+    fn parse_postfix_operator(&mut self) -> ParseResult<PostfixOperator> {
+        if self.accept(Token::Period)?.is_some() {
+            let member = self
+                .require(IdentPattern)?
+                .ok_or(self.error(ParseErrorKind::ExpectedIdent))?
+                .to_string();
+            return Ok(Some(PostfixOperator::StructAccess { member }));
+        }
+        if self.accept(Token::BracketOpen)?.is_some() {
+            let index = self
+                .parse_expr()?
+                .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
+            self.require(Token::BracketClose)?;
+            return Ok(Some(PostfixOperator::Index { at: index }));
+        }
+        if self.accept(Token::As)?.is_some() {
+            let to = self
+                .parse_ty()?
+                .ok_or(self.error(ParseErrorKind::BadType))?;
+            return Ok(Some(PostfixOperator::Cast { to }));
+        }
+        if self.accept(Token::ParenOpen)?.is_some() {
+            let mut args = vec![];
+            let mut no_args = true;
+            while let Some(arg) = self.parse_expr()? {
+                no_args = false;
+                args.push(arg);
+                if self.accept(Token::Comma)?.is_none() {
+                    self.require(Token::ParenClose)?;
+                    break;
+                }
+            }
+            if no_args {
+                self.require(Token::ParenClose)?;
+            }
+
+            return Ok(Some(PostfixOperator::Call { args }));
+        }
+        Ok(None)
     }
 
     fn parse_primary(&mut self) -> ParseResult<Expression> {

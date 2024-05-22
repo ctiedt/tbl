@@ -68,10 +68,18 @@ impl CodeGen {
         is_variadic: bool,
         is_external: bool,
         span: Span,
-    ) -> usize {
+    ) {
         self.ctx.insert_function(
             name.to_string(),
-            FunctionContext::new(id, params, returns, is_variadic, is_external, span),
+            FunctionContext::new(
+                id,
+                params,
+                returns,
+                is_variadic,
+                is_external,
+                span,
+                self.ctx.global_scope.clone(),
+            ),
         )
     }
 
@@ -168,7 +176,7 @@ impl CodeGen {
                     .declare_function(name, cranelift_module::Linkage::Export, &sig)
                     .into_diagnostic()?;
 
-                let fn_idx = self.insert_func(
+                self.insert_func(
                     name,
                     func_id,
                     params.to_vec(),
@@ -177,7 +185,7 @@ impl CodeGen {
                     false,
                     decl.span.clone(),
                 );
-                let fn_name = UserFuncName::user(0, fn_idx as u32);
+                let fn_name = UserFuncName::user(0, func_id.as_u32());
 
                 let mut func = Function::with_name_signature(fn_name, sig);
                 let mut func_ctx = FunctionBuilderContext::new();
@@ -193,7 +201,11 @@ impl CodeGen {
                 let data = StackSlotData::new(StackSlotKind::ExplicitSlot, locals_size);
                 let locals_slot = func_builder.create_sized_stack_slot(data);
                 {
-                    let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
+                    // let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
+                    let fn_ctx = self
+                        .ctx
+                        .get_function_mut(name)
+                        .ok_or(miette!("No function named `{name}`"))?;
                     fn_ctx.init_locals(locals_slot);
                 }
 
@@ -201,13 +213,21 @@ impl CodeGen {
                     let params = func_builder.block_params(fn_entry);
                     let param = params[idx];
                     let ty_size = self.type_size(type_);
-                    let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
+                    // let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
+                    let fn_ctx = self
+                        .ctx
+                        .get_function_mut(name)
+                        .ok_or(miette!("No function named `{name}`"))?;
                     fn_ctx.define_local(&mut func_builder, arg, type_.clone(), ty_size, param)?;
                 }
 
                 for local in locals {
                     let ty_size = self.type_size(&local.1);
-                    let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
+                    // let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
+                    let fn_ctx = self
+                        .ctx
+                        .get_function_mut(name)
+                        .ok_or(miette!("No function named `{name}`"))?;
                     fn_ctx.declare_local(&local.0, local.1.clone(), ty_size)?;
                 }
 
@@ -242,7 +262,12 @@ impl CodeGen {
                     .define_function(func_id, &mut ctx)
                     .into_diagnostic()?;
 
-                let fn_ctx = self.ctx.functions.get(name).unwrap().clone();
+                // let fn_ctx = self.ctx.functions.get(name).unwrap().clone();
+                let fn_ctx = self
+                    .ctx
+                    .get_function(name)
+                    .ok_or(miette!("No function named `{name}`"))?
+                    .clone();
                 self.build_wrapper(name, fn_ctx)?;
             }
             DeclarationKind::Struct { name, members } => self.ctx.create_struct_type(
@@ -279,14 +304,22 @@ impl CodeGen {
                 self.obj_module
                     .define_data(data_id, &data_desc)
                     .into_diagnostic()?;
-                self.ctx.globals.insert(
-                    name.into(),
+                self.ctx.global_scope.insert_global(
+                    name,
                     GlobalContext {
                         id: data_id,
                         type_: type_.clone(),
                         initializer: Some(value.clone()),
                     },
                 );
+                // self.ctx.globals.insert(
+                //     name.into(),
+                //     GlobalContext {
+                //         id: data_id,
+                //         type_: type_.clone(),
+                //         initializer: Some(value.clone()),
+                //     },
+                // );
             }
             DeclarationKind::ExternGlobal { name, type_ } => {
                 let data_id = self
@@ -294,14 +327,22 @@ impl CodeGen {
                     .declare_data(name, cranelift_module::Linkage::Import, true, false)
                     .into_diagnostic()?;
 
-                self.ctx.globals.insert(
-                    name.into(),
+                self.ctx.global_scope.insert_global(
+                    name,
                     GlobalContext {
                         id: data_id,
                         type_: type_.clone(),
                         initializer: None,
                     },
                 );
+                // self.ctx.globals.insert(
+                //     name.into(),
+                //     GlobalContext {
+                //         id: data_id,
+                //         type_: type_.clone(),
+                //         initializer: None,
+                //     },
+                // );
             }
             DeclarationKind::Directive { .. } => {
                 unreachable!("Directives are handled by the preprocessor")
@@ -333,7 +374,7 @@ impl CodeGen {
             .declare_function(&func_name, cranelift_module::Linkage::Export, &sig)
             .into_diagnostic()?;
 
-        let fn_idx = self.insert_func(
+        self.insert_func(
             &func_name,
             func_id,
             vec![(
@@ -345,7 +386,7 @@ impl CodeGen {
             false,
             0..0,
         );
-        let fn_name = UserFuncName::user(0, fn_idx as u32);
+        let fn_name = UserFuncName::user(0, func_id.as_u32());
 
         let mut func = Function::with_name_signature(fn_name, sig);
         let mut func_ctx = FunctionBuilderContext::new();
@@ -422,8 +463,14 @@ impl CodeGen {
         func_builder.switch_to_block(fn_entry);
         func_builder.seal_block(fn_entry);
 
-        let globals = self.ctx.globals.clone();
-        for global in globals.values() {
+        let globals = self
+            .ctx
+            .global_scope
+            .globals()
+            .map(|(_, g)| g)
+            .cloned()
+            .collect::<Vec<_>>();
+        for global in globals {
             if let Some(init) = &global.initializer {
                 let data = self
                     .obj_module
@@ -435,7 +482,8 @@ impl CodeGen {
             }
         }
 
-        let main_ctx = self.ctx.functions.get("__main").unwrap();
+        // let main_ctx = self.ctx.functions.get("__main").unwrap();
+        let main_ctx = self.ctx.get_function("__main").unwrap();
         let main_ref = self
             .obj_module
             .declare_func_in_func(main_ctx.func_id, func_builder.func);
@@ -504,10 +552,7 @@ impl CodeGen {
                     self.compile_stmt(func_builder, stmt)?;
                 }
                 if let Some(last) = then.last() {
-                    if !matches!(
-                        last.kind,
-                        StatementKind::Return(_) | StatementKind::Break | StatementKind::Exit
-                    ) {
+                    if !matches!(last.kind, StatementKind::Return(_) | StatementKind::Break) {
                         func_builder.ins().jump(after_block, &[]);
                     }
                 }
@@ -516,7 +561,7 @@ impl CodeGen {
                     self.compile_stmt(func_builder, stmt)?;
                 }
                 if let Some(last) = else_.last() {
-                    if !matches!(last.kind, StatementKind::Return(_)) {
+                    if !matches!(last.kind, StatementKind::Return(_) | StatementKind::Break) {
                         func_builder.ins().jump(after_block, &[]);
                     }
                 }
@@ -539,7 +584,10 @@ impl CodeGen {
                 self.compile_expr(func_builder, None, expr)?;
             }
             StatementKind::Return(v) => {
-                let ctx = self.ctx.func_by_idx(fn_idx as usize);
+                let ctx = self
+                    .ctx
+                    .func_by_idx(fn_idx)
+                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
                 let mut return_values = vec![];
                 if let Some(expr) = v {
                     return_values.push(self.compile_expr(
@@ -583,7 +631,11 @@ impl CodeGen {
                 }
 
                 let task_name = format!("__{task}_wrapper");
-                let called_task_ctx = self.ctx.functions.get(&task_name).unwrap();
+                // let called_task_ctx = self.ctx.functions.get(&task_name).unwrap();
+                let called_task_ctx = self
+                    .ctx
+                    .get_function(&task_name)
+                    .ok_or(miette!("No task named `{task_name}`"))?;
                 let called_task = self
                     .obj_module
                     .declare_func_in_func(called_task_ctx.func_id, func_builder.func);
@@ -595,17 +647,21 @@ impl CodeGen {
                     .ins()
                     .iconst(self.obj_module.isa().pointer_type(), ty_size as i64);
 
-                let sched_enqeue_ctx = self.ctx.functions.get("sched_enqueue").unwrap();
+                // let sched_enqeue_ctx = self.ctx.functions.get("sched_enqueue").unwrap();
+                let sched_enqueue_ctx = self.ctx.get_function("sched_enqueue").unwrap();
                 let sched_enqueue = self
                     .obj_module
-                    .declare_func_in_func(sched_enqeue_ctx.func_id, func_builder.func);
+                    .declare_func_in_func(sched_enqueue_ctx.func_id, func_builder.func);
 
                 func_builder
                     .ins()
                     .call(sched_enqueue, &[called_task_addr, addr, args_size]);
             }
             StatementKind::Assign { location, value } => {
-                let ctx = self.ctx.func_by_idx(fn_idx as usize);
+                let ctx = self
+                    .ctx
+                    .func_by_idx(fn_idx)
+                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
                 let type_ = self.type_of(ctx, location).unwrap();
                 let loc = self.compile_lvalue(func_builder, location)?;
                 self.store_expr(func_builder, &type_, loc, 0, value)?;
@@ -616,14 +672,20 @@ impl CodeGen {
                 func_builder.switch_to_block(block);
                 let next = func_builder.create_block();
                 {
-                    let ctx = self.ctx.func_by_idx_mut(fn_idx as usize);
+                    let ctx = self
+                        .ctx
+                        .func_by_idx_mut(fn_idx)
+                        .ok_or(miette!("No function with ID `{fn_idx}`"))?;
                     ctx.loop_labels.push(next);
                 }
                 for stmt in body {
                     self.compile_stmt(func_builder, stmt)?;
                 }
                 {
-                    let ctx = self.ctx.func_by_idx_mut(fn_idx as usize);
+                    let ctx = self
+                        .ctx
+                        .func_by_idx_mut(fn_idx)
+                        .ok_or(miette!("No function with ID `{fn_idx}`"))?;
                     ctx.loop_labels.pop().ok_or(miette!("Empty loop stack"))?;
                 }
                 func_builder.ins().jump(block, &[]);
@@ -636,7 +698,10 @@ impl CodeGen {
                 }
             }
             StatementKind::Match { value, branches } => {
-                let ctx = &self.ctx.func_by_idx(fn_idx as usize);
+                let ctx = &self
+                    .ctx
+                    .func_by_idx(fn_idx)
+                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
                 let mut switch = Switch::new();
                 let ty = self.type_of(ctx, value).unwrap();
                 let TblType::Named(ty_name) = ty else {
@@ -683,7 +748,10 @@ impl CodeGen {
                 func_builder.switch_to_block(then);
             }
             StatementKind::Break => {
-                let ctx = self.ctx.func_by_idx(fn_idx as usize);
+                let ctx = self
+                    .ctx
+                    .func_by_idx(fn_idx)
+                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
                 let block = ctx
                     .loop_labels
                     .last()
@@ -836,10 +904,13 @@ impl CodeGen {
                 }
             },
             ExpressionKind::Var(v) => {
-                let ctx = &self.ctx.func_by_idx(fn_idx as usize);
-                match self
+                let ctx = &self
                     .ctx
-                    .resolve_name(ctx, v)
+                    .func_by_idx(fn_idx)
+                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+                match ctx
+                    .scope
+                    .get(v)
                     .ok_or(miette!("Cannot resolve name `{v}`"))?
                 {
                     Symbol::Local(var) => {
@@ -876,84 +947,156 @@ impl CodeGen {
                     }
                 }
             }
-            ExpressionKind::Call { task, args } => match &task.kind {
-                ExpressionKind::Var(task_name) => match self.ctx.functions.get(task_name) {
-                    Some(func_ctx) => {
-                        let func = self
-                            .obj_module
-                            .declare_func_in_func(func_ctx.func_id, builder.func);
-
-                        if func_ctx.is_variadic {
-                            let mut arg_vals = vec![];
-                            for arg in args {
-                                let ty_hint = {
-                                    let ctx = &self.ctx.func_by_idx(fn_idx as usize);
-                                    self.type_of(ctx, arg)
+            ExpressionKind::Call { task, args } => {
+                let ctx = self.ctx.func_by_idx(fn_idx).unwrap();
+                match &task.kind {
+                    // TODO Figure out if I can get rid of code duplication here
+                    ExpressionKind::Var(task_name) => {
+                        match ctx
+                            .scope
+                            .get(task_name)
+                            .ok_or(miette!("No task `{task_name}`"))?
+                        {
+                            Symbol::Local(func_var) => {
+                                let TblType::TaskPtr { params, returns } = &func_var.type_ else {
+                                    unreachable!()
                                 };
-                                let v = self.compile_expr(builder, ty_hint, arg)?;
-                                arg_vals.push(v);
-                            }
-                            let call = builder.ins().call(func, &arg_vals);
+                                let offset = ctx.locals().offset_of(task_name);
+                                let callee = builder.ins().stack_load(
+                                    self.obj_module.isa().pointer_type(),
+                                    ctx.locals().slot,
+                                    Offset32::new(offset as i32),
+                                );
+                                let mut arg_vals = vec![];
+                                let mut sig = self.obj_module.make_signature();
+                                if let Some(returns) = returns.clone() {
+                                    sig.returns.push(AbiParam::new(
+                                        self.to_cranelift_type(&returns).unwrap(),
+                                    ));
+                                }
+                                for (arg, ty) in args.iter().zip(params.clone()) {
+                                    let v = self.compile_expr(builder, Some(ty.clone()), arg)?;
+                                    arg_vals.push(v);
+                                    sig.params
+                                        .push(AbiParam::new(self.to_cranelift_type(&ty).unwrap()));
+                                }
 
-                            let sig_ref = builder.func.dfg.call_signature(call).unwrap();
-                            let abi_params = arg_vals
-                                .into_iter()
-                                .map(|a| {
-                                    let ty = builder.func.dfg.value_type(a);
-                                    AbiParam::new(ty)
-                                })
-                                .collect::<Vec<AbiParam>>();
-
-                            builder.func.dfg.signatures[sig_ref].params = abi_params;
-
-                            let res = builder.inst_results(call);
-                            if res.is_empty() {
-                                Ok(builder.ins().iconst(types::I8, 0))
-                            } else {
-                                Ok(res[0])
+                                let sig_ref = builder.import_signature(sig);
+                                let call = builder.ins().call_indirect(sig_ref, callee, &arg_vals);
+                                let res = builder.inst_results(call);
+                                if res.is_empty() {
+                                    Ok(builder.ins().iconst(types::I8, 0))
+                                } else {
+                                    Ok(res[0])
+                                }
                             }
-                        } else {
-                            let mut arg_vals = vec![];
-                            let param_types = func_ctx.params.clone();
-                            for (arg, (_, ty)) in args.iter().zip(param_types) {
-                                let v = self.compile_expr(builder, Some(ty), arg)?;
-                                arg_vals.push(v);
+                            Symbol::Function(func_ctx) => {
+                                let func = self
+                                    .obj_module
+                                    .declare_func_in_func(func_ctx.func_id, builder.func);
+
+                                if func_ctx.is_variadic {
+                                    let mut arg_vals = vec![];
+                                    for arg in args {
+                                        let ty_hint = {
+                                            let ctx = &self
+                                                .ctx
+                                                .func_by_idx(fn_idx)
+                                                .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+                                            self.type_of(ctx, arg)
+                                        };
+                                        let v = self.compile_expr(builder, ty_hint, arg)?;
+                                        arg_vals.push(v);
+                                    }
+                                    let call = builder.ins().call(func, &arg_vals);
+
+                                    let sig_ref = builder.func.dfg.call_signature(call).unwrap();
+                                    let abi_params = arg_vals
+                                        .into_iter()
+                                        .map(|a| {
+                                            let ty = builder.func.dfg.value_type(a);
+                                            AbiParam::new(ty)
+                                        })
+                                        .collect::<Vec<AbiParam>>();
+
+                                    builder.func.dfg.signatures[sig_ref].params = abi_params;
+
+                                    let res = builder.inst_results(call);
+                                    if res.is_empty() {
+                                        Ok(builder.ins().iconst(types::I8, 0))
+                                    } else {
+                                        Ok(res[0])
+                                    }
+                                } else {
+                                    let mut arg_vals = vec![];
+                                    let param_types = func_ctx.params.clone();
+                                    for (arg, (_, ty)) in args.iter().zip(param_types) {
+                                        let v = self.compile_expr(builder, Some(ty), arg)?;
+                                        arg_vals.push(v);
+                                    }
+                                    let call = builder.ins().call(func, &arg_vals);
+                                    let res = builder.inst_results(call);
+                                    if res.is_empty() {
+                                        Ok(builder.ins().iconst(types::I8, 0))
+                                    } else {
+                                        Ok(res[0])
+                                    }
+                                }
                             }
-                            let call = builder.ins().call(func, &arg_vals);
-                            let res = builder.inst_results(call);
-                            if res.is_empty() {
-                                Ok(builder.ins().iconst(types::I8, 0))
-                            } else {
-                                Ok(res[0])
+                            Symbol::Global(func_var) => {
+                                let TblType::TaskPtr { params, returns } = &func_var.type_ else {
+                                    unreachable!()
+                                };
+                                let offset = ctx.locals().offset_of(task_name);
+                                let callee = builder.ins().stack_load(
+                                    self.obj_module.isa().pointer_type(),
+                                    ctx.locals().slot,
+                                    Offset32::new(offset as i32),
+                                );
+                                let mut arg_vals = vec![];
+                                let mut sig = self.obj_module.make_signature();
+                                if let Some(returns) = returns.clone() {
+                                    sig.returns.push(AbiParam::new(
+                                        self.to_cranelift_type(&returns).unwrap(),
+                                    ));
+                                }
+                                for (arg, ty) in args.iter().zip(params.clone()) {
+                                    let v = self.compile_expr(builder, Some(ty.clone()), arg)?;
+                                    arg_vals.push(v);
+                                    sig.params
+                                        .push(AbiParam::new(self.to_cranelift_type(&ty).unwrap()));
+                                }
+
+                                let sig_ref = builder.import_signature(sig);
+                                let call = builder.ins().call_indirect(sig_ref, callee, &arg_vals);
+                                let res = builder.inst_results(call);
+                                if res.is_empty() {
+                                    Ok(builder.ins().iconst(types::I8, 0))
+                                } else {
+                                    Ok(res[0])
+                                }
                             }
                         }
                     }
-                    None => {
-                        let ctx = &self.ctx.func_by_idx(fn_idx as usize);
-                        let func_var = ctx
-                            .locals()
-                            .find(task_name)
-                            .ok_or(miette!("Could not find task `{task_name}`"))?;
-                        let TblType::TaskPtr { params, returns } = &func_var.type_ else {
-                            unreachable!()
-                        };
-                        let offset = ctx.locals().offset_of(task_name);
-                        let callee = builder.ins().stack_load(
-                            self.obj_module.isa().pointer_type(),
-                            ctx.locals().slot,
-                            Offset32::new(offset as i32),
-                        );
-                        let mut arg_vals = vec![];
+                    expr => {
+                        let ctx = &self
+                            .ctx
+                            .func_by_idx(fn_idx)
+                            .ok_or(miette!("No function with ID `{fn_idx}`"))?;
                         let mut sig = self.obj_module.make_signature();
-                        if let Some(returns) = returns.clone() {
-                            sig.returns
-                                .push(AbiParam::new(self.to_cranelift_type(&returns).unwrap()));
+                        for arg in args {
+                            sig.params.push(AbiParam::new(
+                                self.to_cranelift_type(&self.type_of(ctx, arg).unwrap())
+                                    .unwrap(),
+                            ));
                         }
-                        for (arg, ty) in args.iter().zip(params.clone()) {
-                            let v = self.compile_expr(builder, Some(ty.clone()), arg)?;
-                            arg_vals.push(v);
-                            sig.params
-                                .push(AbiParam::new(self.to_cranelift_type(&ty).unwrap()));
+
+                        let callee = self
+                            .compile_lvalue(builder, &expr.clone().with_span(task.span.clone()))?;
+                        let mut arg_vals = vec![];
+                        for arg in args {
+                            let arg_val = self.compile_expr(builder, None, arg)?;
+                            arg_vals.push(arg_val);
                         }
 
                         let sig_ref = builder.import_signature(sig);
@@ -965,41 +1108,17 @@ impl CodeGen {
                             Ok(res[0])
                         }
                     }
-                },
-                expr => {
-                    let ctx = &self.ctx.func_by_idx(fn_idx as usize);
-                    let mut sig = self.obj_module.make_signature();
-                    for arg in args {
-                        sig.params.push(AbiParam::new(
-                            self.to_cranelift_type(&self.type_of(ctx, arg).unwrap())
-                                .unwrap(),
-                        ));
-                    }
-
-                    let callee =
-                        self.compile_lvalue(builder, &expr.clone().with_span(task.span.clone()))?;
-                    let mut arg_vals = vec![];
-                    for arg in args {
-                        let arg_val = self.compile_expr(builder, None, arg)?;
-                        arg_vals.push(arg_val);
-                    }
-
-                    let sig_ref = builder.import_signature(sig);
-                    let call = builder.ins().call_indirect(sig_ref, callee, &arg_vals);
-                    let res = builder.inst_results(call);
-                    if res.is_empty() {
-                        Ok(builder.ins().iconst(types::I8, 0))
-                    } else {
-                        Ok(res[0])
-                    }
                 }
-            },
+            }
             ExpressionKind::BinaryOperation {
                 left,
                 right,
                 operator,
             } => {
-                let ctx = &self.ctx.func_by_idx(fn_idx as usize);
+                let ctx = &self
+                    .ctx
+                    .func_by_idx(fn_idx)
+                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
                 let type_hint_left = self.type_of(ctx, left);
                 let type_hint_right = self.type_of(ctx, right);
 
@@ -1120,7 +1239,10 @@ impl CodeGen {
                 }
             }
             ExpressionKind::StructAccess { value, member } => {
-                let ctx = &self.ctx.func_by_idx(fn_idx as usize);
+                let ctx = &self
+                    .ctx
+                    .func_by_idx(fn_idx)
+                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
                 let ty_name = self.type_of(ctx, value).unwrap().name();
                 let ty = &self.ctx.types[&ty_name].unwrap_struct();
 
@@ -1144,9 +1266,9 @@ impl CodeGen {
                     unreachable!()
                 };
 
-                match self
-                    .ctx
-                    .resolve_name(ctx, val)
+                match ctx
+                    .scope
+                    .get(val)
                     .ok_or(miette!("Failed to resolve name `{val}`"))?
                 {
                     Symbol::Local(var) => {
@@ -1175,7 +1297,10 @@ impl CodeGen {
                 }
             }
             ExpressionKind::Cast { value, to } => {
-                let ctx = &self.ctx.func_by_idx(fn_idx as usize);
+                let ctx = &self
+                    .ctx
+                    .func_by_idx(fn_idx)
+                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
                 let current_ty = self
                     .type_of(ctx, value)
                     .ok_or(miette!("Type to cast from must be known"))?;
@@ -1227,7 +1352,10 @@ impl CodeGen {
                 }
             }
             ExpressionKind::Index { value, at } => {
-                let ctx = &self.ctx.func_by_idx(fn_idx as usize);
+                let ctx = &self
+                    .ctx
+                    .func_by_idx(fn_idx)
+                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
                 let ty = self.type_of(ctx, value).unwrap();
                 let TblType::Array { item, .. } = ty else {
                     unreachable!()
@@ -1264,12 +1392,15 @@ impl CodeGen {
         expr: &Expression,
     ) -> miette::Result<Value> {
         let fn_idx = builder.func.name.get_user().unwrap().index;
-        let ctx = self.ctx.func_by_idx(fn_idx as usize).clone();
+        let ctx = self
+            .ctx
+            .func_by_idx(fn_idx)
+            .ok_or(miette!("No function with ID `{fn_idx}`"))?;
         match &expr.kind {
             ExpressionKind::Var(v) => {
-                match self
-                    .ctx
-                    .resolve_name(&ctx, v)
+                match ctx
+                    .scope
+                    .get(v)
                     .ok_or(miette!("Failed to resolve name `{v}`"))?
                 {
                     Symbol::Local(var) => {
@@ -1368,7 +1499,7 @@ impl CodeGen {
                     None => None,
                 },
             },
-            ExpressionKind::Var(v) => self.ctx.resolve_name(ctx, v).map(|r| match r {
+            ExpressionKind::Var(v) => ctx.scope.get(v).map(|r| match r {
                 Symbol::Local(var) => var.type_.clone(),
                 Symbol::Function(fun) => TblType::TaskPtr {
                     params: fun.params.iter().map(|(_, ty)| ty.clone()).collect(),
@@ -1377,7 +1508,7 @@ impl CodeGen {
                 Symbol::Global(global) => global.type_.clone(),
             }),
             ExpressionKind::Call { task, .. } => match &task.kind {
-                ExpressionKind::Var(t) => self.ctx.functions[t].returns.clone(),
+                ExpressionKind::Var(t) => self.ctx.get_function(t).unwrap().returns.clone(),
                 _ => None,
             },
             ExpressionKind::BinaryOperation { left, right, .. } => {

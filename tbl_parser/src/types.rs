@@ -350,3 +350,11 @@ pub enum Literal {
         members: Vec<(String, Expression)>,
     },
 }
+
+#[derive(Clone, Debug)]
+pub enum PostfixOperator {
+    StructAccess { member: String },
+    Index { at: Expression },
+    Cast { to: Type },
+    Call { args: Vec<Expression> },
+}
