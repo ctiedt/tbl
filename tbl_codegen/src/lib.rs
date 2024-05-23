@@ -1,5 +1,6 @@
 mod context;
 mod debug_info;
+pub mod error;
 mod generate;
 
 #[derive(Clone)]

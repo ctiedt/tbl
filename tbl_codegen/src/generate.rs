@@ -11,7 +11,6 @@ use cranelift::{
 };
 use cranelift_module::{DataDescription, FuncId, Init, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use miette::{miette, IntoDiagnostic};
 use tracing::info;
 
 use tbl_parser::{
@@ -23,7 +22,10 @@ use tbl_parser::{
     Span,
 };
 
-use crate::context::{StructMember, TypeContext};
+use crate::{
+    context::{StructMember, TypeContext},
+    error::{CodegenError, CodegenResult},
+};
 
 use super::{
     context::{CodeGenContext, FunctionContext, GlobalContext, Symbol},
@@ -43,13 +45,13 @@ impl CodeGen {
         mod_name: String,
         target: Arc<dyn TargetIsa>,
         config: Config,
-    ) -> miette::Result<Self> {
+    ) -> CodegenResult<Self> {
         let obj_builder = ObjectBuilder::new(
             target.clone(),
             mod_name.bytes().collect::<Vec<_>>(),
             cranelift_module::default_libcall_names(),
         )
-        .into_diagnostic()?;
+        .map_err(|e| CodegenError::new(0..0, e.into()))?;
         Ok(Self {
             obj_module: ObjectModule::new(obj_builder),
             ctx: CodeGenContext::default(),
@@ -83,7 +85,7 @@ impl CodeGen {
         )
     }
 
-    pub fn compile(mut self, module: &TblModule) -> miette::Result<String> {
+    pub fn compile(mut self, module: &TblModule) -> CodegenResult<String> {
         info!("Building module {}", module.name);
         for dep in &module.dependencies {
             for decl in dep.exports() {
@@ -106,13 +108,13 @@ impl CodeGen {
         }
 
         let obj_name = format!("{}.o", module.name);
-        let mut file = File::create(&obj_name).into_diagnostic()?;
+        let mut file = File::create(&obj_name).map_err(|e| CodegenError::new(0..0, e.into()))?;
         res.object.write_stream(&mut file).unwrap();
 
         Ok(obj_name)
     }
 
-    pub fn compile_decl(&mut self, decl: &Declaration) -> miette::Result<()> {
+    pub fn compile_decl(&mut self, decl: &Declaration) -> CodegenResult<()> {
         let kind = &decl.kind;
         match kind {
             DeclarationKind::ExternTask {
@@ -135,7 +137,7 @@ impl CodeGen {
                 let id = self
                     .obj_module
                     .declare_function(name, cranelift_module::Linkage::Import, &sig)
-                    .into_diagnostic()?;
+                    .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
 
                 let _fn_idx = self.insert_func(
                     name,
@@ -174,7 +176,7 @@ impl CodeGen {
                 let func_id = self
                     .obj_module
                     .declare_function(name, cranelift_module::Linkage::Export, &sig)
-                    .into_diagnostic()?;
+                    .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
 
                 self.insert_func(
                     name,
@@ -205,7 +207,7 @@ impl CodeGen {
                     let fn_ctx = self
                         .ctx
                         .get_function_mut(name)
-                        .ok_or(miette!("No function named `{name}`"))?;
+                        .ok_or(CodegenError::unknown_task(decl.span.clone(), name))?;
                     fn_ctx.init_locals(locals_slot);
                 }
 
@@ -217,8 +219,10 @@ impl CodeGen {
                     let fn_ctx = self
                         .ctx
                         .get_function_mut(name)
-                        .ok_or(miette!("No function named `{name}`"))?;
-                    fn_ctx.define_local(&mut func_builder, arg, type_.clone(), ty_size, param)?;
+                        .ok_or(CodegenError::unknown_task(decl.span.clone(), name))?;
+                    fn_ctx
+                        .define_local(&mut func_builder, arg, type_.clone(), ty_size, param)
+                        .map_err(|e| CodegenError::new(decl.span.clone(), e))?;
                 }
 
                 for local in locals {
@@ -227,8 +231,10 @@ impl CodeGen {
                     let fn_ctx = self
                         .ctx
                         .get_function_mut(name)
-                        .ok_or(miette!("No function named `{name}`"))?;
-                    fn_ctx.declare_local(&local.0, local.1.clone(), ty_size)?;
+                        .ok_or(CodegenError::unknown_task(decl.span.clone(), name))?;
+                    fn_ctx
+                        .declare_local(&local.0, local.1.clone(), ty_size)
+                        .map_err(|e| CodegenError::new(decl.span.clone(), e))?;
                 }
 
                 for stmt in body {
@@ -251,24 +257,25 @@ impl CodeGen {
 
                 ctx.compute_cfg();
                 ctx.compute_domtree();
-                ctx.verify(self.obj_module.isa()).into_diagnostic()?;
-                ctx.dce(self.obj_module.isa()).into_diagnostic()?;
+                ctx.verify(self.obj_module.isa())
+                    .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
+                ctx.dce(self.obj_module.isa())
+                    .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
                 ctx.eliminate_unreachable_code(self.obj_module.isa())
-                    .into_diagnostic()?;
-                ctx.replace_redundant_loads().into_diagnostic()?;
-                ctx.egraph_pass(self.obj_module.isa()).into_diagnostic()?;
-
+                    .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
+                ctx.replace_redundant_loads()
+                    .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
+                ctx.egraph_pass(self.obj_module.isa())
+                    .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
                 self.obj_module
                     .define_function(func_id, &mut ctx)
-                    .into_diagnostic()?;
-
-                // let fn_ctx = self.ctx.functions.get(name).unwrap().clone();
+                    .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
                 let fn_ctx = self
                     .ctx
                     .get_function(name)
-                    .ok_or(miette!("No function named `{name}`"))?
+                    .ok_or(CodegenError::unknown_task(decl.span.clone(), name))?
                     .clone();
-                self.build_wrapper(name, fn_ctx)?;
+                self.build_wrapper(name, fn_ctx, decl.span.clone())?;
             }
             DeclarationKind::Struct { name, members } => self.ctx.create_struct_type(
                 name,
@@ -286,7 +293,7 @@ impl CodeGen {
                 let data_id = self
                     .obj_module
                     .declare_data(name, cranelift_module::Linkage::Export, true, false)
-                    .into_diagnostic()?;
+                    .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
                 let mut data_desc = DataDescription::new();
                 match &value.kind {
                     ExpressionKind::Literal(Literal::Int(i)) => {
@@ -303,7 +310,7 @@ impl CodeGen {
                 }
                 self.obj_module
                     .define_data(data_id, &data_desc)
-                    .into_diagnostic()?;
+                    .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
                 self.ctx.global_scope.insert_global(
                     name,
                     GlobalContext {
@@ -325,7 +332,7 @@ impl CodeGen {
                 let data_id = self
                     .obj_module
                     .declare_data(name, cranelift_module::Linkage::Import, true, false)
-                    .into_diagnostic()?;
+                    .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
 
                 self.ctx.global_scope.insert_global(
                     name,
@@ -352,7 +359,12 @@ impl CodeGen {
         Ok(())
     }
 
-    fn build_wrapper(&mut self, name: &str, fn_ctx: FunctionContext) -> miette::Result<()> {
+    fn build_wrapper(
+        &mut self,
+        name: &str,
+        fn_ctx: FunctionContext,
+        span: Span,
+    ) -> CodegenResult<()> {
         let params_name = format!("__{name}_args");
         self.ctx.create_struct_type(
             &params_name,
@@ -372,7 +384,7 @@ impl CodeGen {
         let func_id = self
             .obj_module
             .declare_function(&func_name, cranelift_module::Linkage::Export, &sig)
-            .into_diagnostic()?;
+            .map_err(|e| CodegenError::new(span.clone(), e.into()))?;
 
         self.insert_func(
             &func_name,
@@ -384,7 +396,7 @@ impl CodeGen {
             None,
             false,
             false,
-            0..0,
+            span.clone(),
         );
         let fn_name = UserFuncName::user(0, func_id.as_u32());
 
@@ -428,21 +440,30 @@ impl CodeGen {
 
         ctx.compute_cfg();
         ctx.compute_domtree();
-        ctx.verify(self.obj_module.isa()).into_diagnostic()?;
-        ctx.dce(self.obj_module.isa()).into_diagnostic()?;
+        let span_clone = span.clone();
+        ctx.verify(self.obj_module.isa())
+            .map_err(|e| CodegenError::new(span_clone, e.into()))?;
+        let span_clone = span.clone();
+        ctx.dce(self.obj_module.isa())
+            .map_err(|e| CodegenError::new(span_clone, e.into()))?;
+        let span_clone = span.clone();
         ctx.eliminate_unreachable_code(self.obj_module.isa())
-            .into_diagnostic()?;
-        ctx.replace_redundant_loads().into_diagnostic()?;
-        ctx.egraph_pass(self.obj_module.isa()).into_diagnostic()?;
-
+            .map_err(|e| CodegenError::new(span_clone, e.into()))?;
+        let span_clone = span.clone();
+        ctx.replace_redundant_loads()
+            .map_err(|e| CodegenError::new(span_clone, e.into()))?;
+        let span_clone = span.clone();
+        ctx.egraph_pass(self.obj_module.isa())
+            .map_err(|e| CodegenError::new(span_clone, e.into()))?;
+        let span_clone = span.clone();
         self.obj_module
             .define_function(func_id, &mut ctx)
-            .into_diagnostic()?;
+            .map_err(|e| CodegenError::new(span_clone, e.into()))?;
 
         Ok(())
     }
 
-    fn build_start(&mut self) -> miette::Result<()> {
+    fn build_start(&mut self) -> CodegenResult<()> {
         let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
         sig.params.push(AbiParam::new(types::I32));
         sig.params
@@ -451,7 +472,7 @@ impl CodeGen {
         let func_id = self
             .obj_module
             .declare_function("main", cranelift_module::Linkage::Export, &sig)
-            .into_diagnostic()?;
+            .map_err(|e| CodegenError::new(0..0, e.into()))?;
         let mut func = Function::new();
         func.signature = sig;
 
@@ -492,7 +513,7 @@ impl CodeGen {
         let sched_run_id = self
             .obj_module
             .declare_function("sched_run", cranelift_module::Linkage::Export, &sig)
-            .into_diagnostic()?;
+            .map_err(|e| CodegenError::new(0..0, e.into()))?;
 
         let sched_run = self
             .obj_module
@@ -518,7 +539,7 @@ impl CodeGen {
         let mut ctx = Context::for_function(func);
         self.obj_module
             .define_function(func_id, &mut ctx)
-            .into_diagnostic()?;
+            .map_err(|e| CodegenError::new(0..0, e.into()))?;
         Ok(())
     }
 
@@ -526,7 +547,7 @@ impl CodeGen {
         &mut self,
         func_builder: &mut FunctionBuilder,
         stmt: &Statement,
-    ) -> miette::Result<()> {
+    ) -> CodegenResult<()> {
         let fn_idx = func_builder.func.name.get_user().unwrap().index;
         match &stmt.kind {
             StatementKind::Conditional { test, then, else_ } => {
@@ -587,7 +608,7 @@ impl CodeGen {
                 let ctx = self
                     .ctx
                     .func_by_idx(fn_idx)
-                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+                    .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
                 let mut return_values = vec![];
                 if let Some(expr) = v {
                     return_values.push(self.compile_expr(
@@ -635,7 +656,7 @@ impl CodeGen {
                 let called_task_ctx = self
                     .ctx
                     .get_function(&task_name)
-                    .ok_or(miette!("No task named `{task_name}`"))?;
+                    .ok_or(CodegenError::unknown_task(stmt.span.clone(), &task_name))?;
                 let called_task = self
                     .obj_module
                     .declare_func_in_func(called_task_ctx.func_id, func_builder.func);
@@ -661,7 +682,7 @@ impl CodeGen {
                 let ctx = self
                     .ctx
                     .func_by_idx(fn_idx)
-                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+                    .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
                 let type_ = self.type_of(ctx, location).unwrap();
                 let loc = self.compile_lvalue(func_builder, location)?;
                 self.store_expr(func_builder, &type_, loc, 0, value)?;
@@ -675,7 +696,7 @@ impl CodeGen {
                     let ctx = self
                         .ctx
                         .func_by_idx_mut(fn_idx)
-                        .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+                        .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
                     ctx.loop_labels.push(next);
                 }
                 for stmt in body {
@@ -685,8 +706,10 @@ impl CodeGen {
                     let ctx = self
                         .ctx
                         .func_by_idx_mut(fn_idx)
-                        .ok_or(miette!("No function with ID `{fn_idx}`"))?;
-                    ctx.loop_labels.pop().ok_or(miette!("Empty loop stack"))?;
+                        .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
+                    ctx.loop_labels
+                        .pop()
+                        .ok_or(CodegenError::empty_loop_stack(stmt.span.clone()))?;
                 }
                 func_builder.ins().jump(block, &[]);
                 func_builder.seal_block(next);
@@ -701,7 +724,7 @@ impl CodeGen {
                 let ctx = &self
                     .ctx
                     .func_by_idx(fn_idx)
-                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+                    .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
                 let mut switch = Switch::new();
                 let ty = self.type_of(ctx, value).unwrap();
                 let TblType::Named(ty_name) = ty else {
@@ -751,11 +774,11 @@ impl CodeGen {
                 let ctx = self
                     .ctx
                     .func_by_idx(fn_idx)
-                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+                    .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
                 let block = ctx
                     .loop_labels
                     .last()
-                    .ok_or(miette!("No loop to break from"))?;
+                    .ok_or(CodegenError::empty_loop_stack(stmt.span.clone()))?;
                 func_builder.ins().jump(*block, &[]);
             }
         }
@@ -769,7 +792,7 @@ impl CodeGen {
         addr: Value,
         offset: i32,
         value: &Expression,
-    ) -> miette::Result<()> {
+    ) -> CodegenResult<()> {
         match type_ {
             TblType::Named(name) => match &value.kind {
                 ExpressionKind::Literal(Literal::Struct(members)) => {
@@ -859,7 +882,7 @@ impl CodeGen {
         builder: &mut FunctionBuilder,
         type_hint: Option<TblType>,
         expr: &Expression,
-    ) -> miette::Result<Value> {
+    ) -> CodegenResult<Value> {
         let fn_idx = builder.func.name.get_user().unwrap().index;
         match &expr.kind {
             ExpressionKind::Literal(literal) => match literal {
@@ -868,14 +891,14 @@ impl CodeGen {
                         let ty = self.to_cranelift_type(&type_hint).unwrap();
                         Ok(builder.ins().iconst(ty, *i))
                     } else {
-                        Err(miette!("No type hint for int literal `{i}`"))
+                        Err(CodegenError::missing_type_hint(expr.span.clone()))
                     }
                 }
                 Literal::String(s) => {
                     let data_id = self
                         .obj_module
                         .declare_anonymous_data(true, false)
-                        .into_diagnostic()?;
+                        .map_err(|e| CodegenError::new(expr.span.clone(), e.into()))?;
                     let mut description = DataDescription::new();
                     description.define(
                         s.clone()
@@ -886,7 +909,7 @@ impl CodeGen {
                     );
                     self.obj_module
                         .define_data(data_id, &description)
-                        .into_diagnostic()?;
+                        .map_err(|e| CodegenError::new(expr.span.clone(), e.into()))?;
                     let data = self.obj_module.declare_data_in_func(data_id, builder.func);
                     Ok(builder
                         .ins()
@@ -898,8 +921,8 @@ impl CodeGen {
                 },
                 Literal::Struct(_) | Literal::Array(_) | Literal::Enum { .. } => {
                     // Composite literals cannot be created "freestanding". They can only be used for assignments.
-                    Err(miette!(
-                        "Freestanding composite literal in illegal position"
+                    Err(CodegenError::freestanding_composite_literal(
+                        expr.span.clone(),
                     ))
                 }
             },
@@ -907,11 +930,11 @@ impl CodeGen {
                 let ctx = &self
                     .ctx
                     .func_by_idx(fn_idx)
-                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+                    .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
                 match ctx
                     .scope
                     .get(v)
-                    .ok_or(miette!("Cannot resolve name `{v}`"))?
+                    .ok_or(CodegenError::unknown_symbol(expr.span.clone(), v))?
                 {
                     Symbol::Local(var) => {
                         let offset = ctx.locals().offset_of(&var.name);
@@ -950,46 +973,12 @@ impl CodeGen {
             ExpressionKind::Call { task, args } => {
                 let ctx = self.ctx.func_by_idx(fn_idx).unwrap();
                 match &task.kind {
-                    // TODO Figure out if I can get rid of code duplication here
                     ExpressionKind::Var(task_name) => {
                         match ctx
                             .scope
                             .get(task_name)
-                            .ok_or(miette!("No task `{task_name}`"))?
+                            .ok_or(CodegenError::unknown_task(expr.span.clone(), task_name))?
                         {
-                            Symbol::Local(func_var) => {
-                                let TblType::TaskPtr { params, returns } = &func_var.type_ else {
-                                    unreachable!()
-                                };
-                                let offset = ctx.locals().offset_of(task_name);
-                                let callee = builder.ins().stack_load(
-                                    self.obj_module.isa().pointer_type(),
-                                    ctx.locals().slot,
-                                    Offset32::new(offset as i32),
-                                );
-                                let mut arg_vals = vec![];
-                                let mut sig = self.obj_module.make_signature();
-                                if let Some(returns) = returns.clone() {
-                                    sig.returns.push(AbiParam::new(
-                                        self.to_cranelift_type(&returns).unwrap(),
-                                    ));
-                                }
-                                for (arg, ty) in args.iter().zip(params.clone()) {
-                                    let v = self.compile_expr(builder, Some(ty.clone()), arg)?;
-                                    arg_vals.push(v);
-                                    sig.params
-                                        .push(AbiParam::new(self.to_cranelift_type(&ty).unwrap()));
-                                }
-
-                                let sig_ref = builder.import_signature(sig);
-                                let call = builder.ins().call_indirect(sig_ref, callee, &arg_vals);
-                                let res = builder.inst_results(call);
-                                if res.is_empty() {
-                                    Ok(builder.ins().iconst(types::I8, 0))
-                                } else {
-                                    Ok(res[0])
-                                }
-                            }
                             Symbol::Function(func_ctx) => {
                                 let func = self
                                     .obj_module
@@ -999,10 +988,12 @@ impl CodeGen {
                                     let mut arg_vals = vec![];
                                     for arg in args {
                                         let ty_hint = {
-                                            let ctx = &self
-                                                .ctx
-                                                .func_by_idx(fn_idx)
-                                                .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+                                            let ctx = &self.ctx.func_by_idx(fn_idx).ok_or(
+                                                CodegenError::unknown_task_id(
+                                                    expr.span.clone(),
+                                                    fn_idx,
+                                                ),
+                                            )?;
                                             self.type_of(ctx, arg)
                                         };
                                         let v = self.compile_expr(builder, ty_hint, arg)?;
@@ -1043,8 +1034,8 @@ impl CodeGen {
                                     }
                                 }
                             }
-                            Symbol::Global(func_var) => {
-                                let TblType::TaskPtr { params, returns } = &func_var.type_ else {
+                            func_var => {
+                                let TblType::TaskPtr { params, returns } = &func_var.type_() else {
                                     unreachable!()
                                 };
                                 let offset = ctx.locals().offset_of(task_name);
@@ -1078,11 +1069,11 @@ impl CodeGen {
                             }
                         }
                     }
-                    expr => {
+                    expr_kind => {
                         let ctx = &self
                             .ctx
                             .func_by_idx(fn_idx)
-                            .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+                            .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
                         let mut sig = self.obj_module.make_signature();
                         for arg in args {
                             sig.params.push(AbiParam::new(
@@ -1091,8 +1082,10 @@ impl CodeGen {
                             ));
                         }
 
-                        let callee = self
-                            .compile_lvalue(builder, &expr.clone().with_span(task.span.clone()))?;
+                        let callee = self.compile_lvalue(
+                            builder,
+                            &expr_kind.clone().with_span(task.span.clone()),
+                        )?;
                         let mut arg_vals = vec![];
                         for arg in args {
                             let arg_val = self.compile_expr(builder, None, arg)?;
@@ -1118,7 +1111,7 @@ impl CodeGen {
                 let ctx = &self
                     .ctx
                     .func_by_idx(fn_idx)
-                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+                    .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
                 let type_hint_left = self.type_of(ctx, left);
                 let type_hint_right = self.type_of(ctx, right);
 
@@ -1185,7 +1178,7 @@ impl CodeGen {
                         if l == r {
                             Some(l)
                         } else {
-                            return Err(miette!("Conflicting types `{l:?}` and `{r:?}`"));
+                            return Err(CodegenError::conflicting_types(expr.span.clone(), l, r));
                         }
                     }
                 };
@@ -1242,7 +1235,7 @@ impl CodeGen {
                 let ctx = &self
                     .ctx
                     .func_by_idx(fn_idx)
-                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+                    .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
                 let ty_name = self.type_of(ctx, value).unwrap().name();
                 let ty = &self.ctx.types[&ty_name].unwrap_struct();
 
@@ -1260,7 +1253,10 @@ impl CodeGen {
 
                 let member_ty = self
                     .to_cranelift_type(ty.member_ty(ty.member_idx(member)))
-                    .ok_or(miette!("Cannot convert TBL type to cranelift type"))?;
+                    .ok_or(CodegenError::cannot_convert_to_cranelift_type(
+                        expr.span.clone(),
+                        ty.member_ty(ty.member_idx(member)).clone(),
+                    ))?;
 
                 let ExpressionKind::Var(ref val) = &value.kind else {
                     unreachable!()
@@ -1269,7 +1265,7 @@ impl CodeGen {
                 match ctx
                     .scope
                     .get(val)
-                    .ok_or(miette!("Failed to resolve name `{val}`"))?
+                    .ok_or(CodegenError::unknown_symbol(expr.span.clone(), val))?
                 {
                     Symbol::Local(var) => {
                         let var_offset = ctx.locals().offset_of(&var.name);
@@ -1300,10 +1296,10 @@ impl CodeGen {
                 let ctx = &self
                     .ctx
                     .func_by_idx(fn_idx)
-                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+                    .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
                 let current_ty = self
                     .type_of(ctx, value)
-                    .ok_or(miette!("Type to cast from must be known"))?;
+                    .ok_or(CodegenError::unknown_cast_from(expr.span.clone()))?;
                 let val = self.compile_expr(builder, Some(current_ty.clone()), value)?;
                 match (current_ty, to.clone()) {
                     (
@@ -1341,21 +1337,17 @@ impl CodeGen {
                         }),
                         value,
                     ),
-                    (
-                        TblType::Integer {
-                            signed: false,
-                            width,
-                        },
-                        TblType::Pointer(p),
-                    ) => self.compile_expr(builder, Some(TblType::Pointer(p)), value),
-                    (t1, t2) => Err(miette!("Cannot cast from {t1:?} to {t2:?}")),
+                    (TblType::Integer { signed: false, .. }, TblType::Pointer(p)) => {
+                        self.compile_expr(builder, Some(TblType::Pointer(p)), value)
+                    }
+                    (t1, t2) => Err(CodegenError::illegal_cast(expr.span.clone(), t1, t2)),
                 }
             }
             ExpressionKind::Index { value, at } => {
                 let ctx = &self
                     .ctx
                     .func_by_idx(fn_idx)
-                    .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+                    .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
                 let ty = self.type_of(ctx, value).unwrap();
                 let TblType::Array { item, .. } = ty else {
                     unreachable!()
@@ -1390,18 +1382,18 @@ impl CodeGen {
         &mut self,
         builder: &mut FunctionBuilder,
         expr: &Expression,
-    ) -> miette::Result<Value> {
+    ) -> CodegenResult<Value> {
         let fn_idx = builder.func.name.get_user().unwrap().index;
         let ctx = self
             .ctx
             .func_by_idx(fn_idx)
-            .ok_or(miette!("No function with ID `{fn_idx}`"))?;
+            .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
         match &expr.kind {
             ExpressionKind::Var(v) => {
                 match ctx
                     .scope
                     .get(v)
-                    .ok_or(miette!("Failed to resolve name `{v}`"))?
+                    .ok_or(CodegenError::unknown_symbol(expr.span.clone(), v))?
                 {
                     Symbol::Local(var) => {
                         let offset = ctx.locals().offset_of(&var.name);
@@ -1476,7 +1468,7 @@ impl CodeGen {
                 value,
                 operator: UnaryOperator::Dereference,
             } => self.compile_expr(builder, self.type_of(&ctx, value), value),
-            e => Err(miette!("Illegal expression for lvalue: {e:?}")),
+            e => Err(CodegenError::illegal_lvalue(expr.span.clone(), e.clone())),
         }
     }
 

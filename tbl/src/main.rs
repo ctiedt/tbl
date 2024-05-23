@@ -11,7 +11,7 @@ use cranelift::{
     },
 };
 use miette::IntoDiagnostic;
-use tbl_codegen::{CodeGen, Config};
+use tbl_codegen::{error::CodegenResult, CodeGen, Config};
 
 use tbl_parser::module::{parse_module_hierarchy, TblModule};
 use tracing::error;
@@ -143,7 +143,7 @@ fn compile_module(
     module: &TblModule,
     target: Arc<dyn TargetIsa>,
     config: Config,
-) -> miette::Result<Vec<String>> {
+) -> CodegenResult<Vec<String>> {
     let mut modules = vec![];
     for dep in &module.dependencies {
         let mut cfg = config.clone();
@@ -207,7 +207,7 @@ fn main() -> miette::Result<()> {
     let config = Config {
         is_debug: args.is_debug,
         compile_only: args.compile_only,
-        filename: args.file,
+        filename: args.file.clone(),
     };
 
     let target = match &args.target {
@@ -218,15 +218,27 @@ fn main() -> miette::Result<()> {
     .finish(shared_flags)
     .into_diagnostic()?;
 
-    let outputs = compile_module(&module, target, config)?;
-    if !args.compile_only {
-        let link_target = host_target();
-        link(
-            &mod_name,
-            link_target,
-            &outputs,
-            args.linked_objects.as_slice(),
-        )?;
+    match compile_module(&module, target, config) {
+        Ok(outputs) => {
+            if !args.compile_only {
+                let link_target = host_target();
+                link(
+                    &mod_name,
+                    link_target,
+                    &outputs,
+                    args.linked_objects.as_slice(),
+                )?;
+            }
+        }
+        Err(err) => {
+            let src = std::fs::read_to_string(&args.file).into_diagnostic()?;
+            ariadne::Report::build(ariadne::ReportKind::Error, &mod_name, err.span.start)
+                .with_message(err.kind.to_string())
+                .with_label(Label::new((&mod_name, err.span.clone())))
+                .finish()
+                .eprint((&mod_name, ariadne::Source::from(&src)))
+                .into_diagnostic()?;
+        }
     }
     Ok(())
 }

@@ -20,7 +20,8 @@ use cranelift_object::{
     object::{write::Relocation, RelocationEncoding, RelocationKind, SectionKind},
     ObjectProduct,
 };
-use miette::IntoDiagnostic;
+
+use crate::error::{CodegenError, CodegenResult};
 
 use super::{
     context::{CodeGenContext, FunctionContext},
@@ -97,7 +98,7 @@ impl DebugInfoGenerator {
         &mut self,
         ctx: &CodeGenContext,
         object: &mut ObjectProduct,
-    ) -> miette::Result<()> {
+    ) -> CodegenResult<()> {
         self.generate_primitive_types();
 
         for (_, func) in ctx.global_scope.functions() {
@@ -105,7 +106,9 @@ impl DebugInfoGenerator {
         }
 
         let mut sections = Sections::new(DebugInfoWriter::new(RunTimeEndian::Little));
-        self.dwarf.write(&mut sections).into_diagnostic()?;
+        self.dwarf
+            .write(&mut sections)
+            .map_err(|e| CodegenError::new(0..0, e.into()))?;
 
         let mut section_map = HashMap::new();
         sections
@@ -133,7 +136,7 @@ impl DebugInfoGenerator {
                 }
                 Ok::<(), Infallible>(())
             })
-            .into_diagnostic()?;
+            .unwrap();
 
         sections
             .for_each(|id, section| {
@@ -161,7 +164,7 @@ impl DebugInfoGenerator {
                 }
                 Ok::<(), Infallible>(())
             })
-            .into_diagnostic()?;
+            .unwrap();
 
         Ok(())
     }

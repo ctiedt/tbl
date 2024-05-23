@@ -10,5 +10,5 @@ tbl_parser = { path = "../tbl_parser" }
 cranelift = "0.105.1"
 cranelift-module = "0.105.1"
 cranelift-object = "0.105.1"
-miette = "7.2.0"
 tracing = "0.1.40"
+thiserror = "1.0.61"

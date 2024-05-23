@@ -11,6 +11,8 @@ use tbl_parser::{
     Span,
 };
 
+use crate::error::{CodegenError, CodegenErrorKind, CodegenResult};
+
 #[derive(Default)]
 pub struct CodeGenContext {
     pub types: HashMap<String, TypeContext>,
@@ -175,6 +177,19 @@ pub enum Symbol {
     Global(GlobalContext),
 }
 
+impl Symbol {
+    pub fn type_(&self) -> TblType {
+        match self {
+            Symbol::Local(l) => l.type_.clone(),
+            Symbol::Function(f) => TblType::TaskPtr {
+                params: f.params.iter().map(|(_, t)| t).cloned().collect(),
+                returns: f.returns.clone().map(Box::new),
+            },
+            Symbol::Global(g) => g.type_.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum TypeContext {
     Struct(StructContext),
@@ -264,18 +279,12 @@ impl FunctionContext {
         self.locals.as_ref().unwrap()
     }
 
-    pub fn declare_local(&mut self, name: &str, type_: TblType, size: u32) -> miette::Result<()> {
-        // match self.locals.as_mut() {
-        //     Some(locals) => {
-        //         locals.vars.push(Local {
-        //             name: name.to_string(),
-        //             type_,
-        //             size,
-        //         });
-        //         Ok(())
-        //     }
-        //     None => miette::bail!("Tried to insert locals into an external task"),
-        // }
+    pub fn declare_local(
+        &mut self,
+        name: &str,
+        type_: TblType,
+        size: u32,
+    ) -> Result<(), CodegenErrorKind> {
         match self.locals.as_mut() {
             Some(locals) => {
                 let local = Local {
@@ -287,7 +296,7 @@ impl FunctionContext {
                 locals.vars.push(local);
                 Ok(())
             }
-            None => miette::bail!("Tried to insert locals into an external task"),
+            None => Err(CodegenErrorKind::ExternTaskError),
         }
     }
 
@@ -298,7 +307,7 @@ impl FunctionContext {
         type_: TblType,
         size: u32,
         value: Value,
-    ) -> miette::Result<()> {
+    ) -> Result<(), CodegenErrorKind> {
         match self.locals.as_mut() {
             Some(locals) => {
                 let idx = locals.next_idx();
@@ -314,7 +323,7 @@ impl FunctionContext {
                 locals.vars.push(local);
                 Ok(())
             }
-            None => miette::bail!("Tried to insert locals into an external task"),
+            None => Err(CodegenErrorKind::ExternTaskError),
         }
     }
 }
@@ -333,10 +342,6 @@ pub struct Locals {
 }
 
 impl Locals {
-    pub fn find(&self, name: &str) -> Option<&Local> {
-        self.vars.iter().find(|v| v.name == name)
-    }
-
     fn next_idx(&self) -> u32 {
         self.vars.iter().map(|l| l.size).sum()
     }
@@ -372,7 +377,7 @@ impl EnumContext {
             .unwrap()
     }
 
-    pub fn get_variant(&self, variant: &str) -> miette::Result<StructContext> {
+    pub fn get_variant(&self, variant: &str) -> CodegenResult<StructContext> {
         self.variants
             .iter()
             .find_map(|(name, ctx)| {
@@ -382,7 +387,7 @@ impl EnumContext {
                     None
                 }
             })
-            .ok_or(miette::miette!("No variant named `{variant}`"))
+            .ok_or(CodegenError::no_such_variant(0..0, variant))
     }
 }
 
@@ -407,17 +412,12 @@ impl Scope {
         }
     }
 
-    pub fn insert(&mut self, key: impl Into<String>, value: Symbol) {
-        self.variables.insert(key.into(), value);
-    }
-
     pub fn insert_global(&mut self, key: impl Into<String>, value: GlobalContext) {
         self.variables.insert(key.into(), Symbol::Global(value));
     }
 
     pub fn insert_local(&mut self, key: impl Into<String>, value: Local) {
         let key = key.into();
-        println!("Inserting local {}", key);
         self.variables.insert(key.into(), Symbol::Local(value));
     }
 
