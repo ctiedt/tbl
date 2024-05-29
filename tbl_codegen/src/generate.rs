@@ -204,7 +204,7 @@ impl CodeGen {
                 let locals_slot = func_builder.create_sized_stack_slot(data);
                 {
                     // let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
-                    let fn_ctx = self
+                    let mut fn_ctx = self
                         .ctx
                         .get_function_mut(name)
                         .ok_or(CodegenError::unknown_task(decl.span.clone(), name))?;
@@ -216,7 +216,7 @@ impl CodeGen {
                     let param = params[idx];
                     let ty_size = self.type_size(type_);
                     // let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
-                    let fn_ctx = self
+                    let mut fn_ctx = self
                         .ctx
                         .get_function_mut(name)
                         .ok_or(CodegenError::unknown_task(decl.span.clone(), name))?;
@@ -228,7 +228,7 @@ impl CodeGen {
                 for local in locals {
                     let ty_size = self.type_size(&local.1);
                     // let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
-                    let fn_ctx = self
+                    let mut fn_ctx = self
                         .ctx
                         .get_function_mut(name)
                         .ok_or(CodegenError::unknown_task(decl.span.clone(), name))?;
@@ -487,11 +487,19 @@ impl CodeGen {
         let globals = self
             .ctx
             .global_scope
-            .globals()
-            .map(|(_, g)| g)
-            .cloned()
+            .symbols()
+            .into_iter()
+            .filter_map(|(_, g)| {
+                if let Symbol::Global(global) = g {
+                    Some(global)
+                } else {
+                    None
+                }
+            })
+            // .map(|(_, g)| g)
             .collect::<Vec<_>>();
         for global in globals {
+            let global = global.borrow();
             if let Some(init) = &global.initializer {
                 let data = self
                     .obj_module
@@ -605,17 +613,16 @@ impl CodeGen {
                 self.compile_expr(func_builder, None, expr)?;
             }
             StatementKind::Return(v) => {
-                let ctx = self
-                    .ctx
-                    .func_by_idx(fn_idx)
-                    .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
+                let returns = {
+                    let ctx = self
+                        .ctx
+                        .func_by_idx(fn_idx)
+                        .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
+                    ctx.returns.clone()
+                };
                 let mut return_values = vec![];
                 if let Some(expr) = v {
-                    return_values.push(self.compile_expr(
-                        func_builder,
-                        ctx.returns.clone(),
-                        expr,
-                    )?);
+                    return_values.push(self.compile_expr(func_builder, returns, expr)?);
                 }
                 func_builder.ins().return_(&return_values);
             }
@@ -679,11 +686,13 @@ impl CodeGen {
                     .call(sched_enqueue, &[called_task_addr, addr, args_size]);
             }
             StatementKind::Assign { location, value } => {
-                let ctx = self
-                    .ctx
-                    .func_by_idx(fn_idx)
-                    .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
-                let type_ = self.type_of(ctx, location).unwrap();
+                let type_ = {
+                    let ctx = self
+                        .ctx
+                        .func_by_idx(fn_idx)
+                        .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
+                    self.type_of(&ctx, location).unwrap()
+                };
                 let loc = self.compile_lvalue(func_builder, location)?;
                 self.store_expr(func_builder, &type_, loc, 0, value)?;
             }
@@ -693,7 +702,7 @@ impl CodeGen {
                 func_builder.switch_to_block(block);
                 let next = func_builder.create_block();
                 {
-                    let ctx = self
+                    let mut ctx = self
                         .ctx
                         .func_by_idx_mut(fn_idx)
                         .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
@@ -703,7 +712,7 @@ impl CodeGen {
                     self.compile_stmt(func_builder, stmt)?;
                 }
                 {
-                    let ctx = self
+                    let mut ctx = self
                         .ctx
                         .func_by_idx_mut(fn_idx)
                         .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
@@ -721,12 +730,14 @@ impl CodeGen {
                 }
             }
             StatementKind::Match { value, branches } => {
-                let ctx = &self
-                    .ctx
-                    .func_by_idx(fn_idx)
-                    .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
                 let mut switch = Switch::new();
-                let ty = self.type_of(ctx, value).unwrap();
+                let ty = {
+                    let ctx = &self
+                        .ctx
+                        .func_by_idx(fn_idx)
+                        .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
+                    self.type_of(ctx, value).unwrap()
+                };
                 let TblType::Named(ty_name) = ty else {
                     unreachable!()
                 };
@@ -937,6 +948,7 @@ impl CodeGen {
                     .ok_or(CodegenError::unknown_symbol(expr.span.clone(), v))?
                 {
                     Symbol::Local(var) => {
+                        let var = var.borrow();
                         let offset = ctx.locals().offset_of(&var.name);
                         Ok(builder.ins().stack_load(
                             self.to_cranelift_type(&var.type_).unwrap(),
@@ -945,6 +957,7 @@ impl CodeGen {
                         ))
                     }
                     Symbol::Function(fun) => {
+                        let fun = fun.borrow();
                         let func_id = self
                             .obj_module
                             .declare_func_in_func(fun.func_id, builder.func);
@@ -953,6 +966,7 @@ impl CodeGen {
                             .func_addr(self.obj_module.isa().pointer_type(), func_id))
                     }
                     Symbol::Global(global) => {
+                        let global = global.borrow();
                         let data = self
                             .obj_module
                             .declare_data_in_func(global.id, builder.func);
@@ -971,15 +985,18 @@ impl CodeGen {
                 }
             }
             ExpressionKind::Call { task, args } => {
-                let ctx = self.ctx.func_by_idx(fn_idx).unwrap();
+                // let ctx = self.ctx.func_by_idx(fn_idx).unwrap();
                 match &task.kind {
                     ExpressionKind::Var(task_name) => {
-                        match ctx
-                            .scope
-                            .get(task_name)
-                            .ok_or(CodegenError::unknown_task(expr.span.clone(), task_name))?
-                        {
+                        let sym = {
+                            let ctx = self.ctx.func_by_idx(fn_idx).unwrap();
+                            ctx.scope
+                                .get(task_name)
+                                .ok_or(CodegenError::unknown_task(expr.span.clone(), task_name))?
+                        };
+                        match sym {
                             Symbol::Function(func_ctx) => {
+                                let func_ctx = func_ctx.borrow();
                                 let func = self
                                     .obj_module
                                     .declare_func_in_func(func_ctx.func_id, builder.func);
@@ -1038,12 +1055,17 @@ impl CodeGen {
                                 let TblType::TaskPtr { params, returns } = &func_var.type_() else {
                                     unreachable!()
                                 };
-                                let offset = ctx.locals().offset_of(task_name);
-                                let callee = builder.ins().stack_load(
-                                    self.obj_module.isa().pointer_type(),
-                                    ctx.locals().slot,
-                                    Offset32::new(offset as i32),
-                                );
+                                let callee = {
+                                    let ctx = self.ctx.func_by_idx(fn_idx).ok_or(
+                                        CodegenError::unknown_task_id(expr.span.clone(), fn_idx),
+                                    )?;
+                                    let offset = ctx.locals().offset_of(task_name);
+                                    builder.ins().stack_load(
+                                        self.obj_module.isa().pointer_type(),
+                                        ctx.locals().slot,
+                                        Offset32::new(offset as i32),
+                                    )
+                                };
                                 let mut arg_vals = vec![];
                                 let mut sig = self.obj_module.make_signature();
                                 if let Some(returns) = returns.clone() {
@@ -1070,16 +1092,18 @@ impl CodeGen {
                         }
                     }
                     expr_kind => {
-                        let ctx = &self
-                            .ctx
-                            .func_by_idx(fn_idx)
-                            .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
                         let mut sig = self.obj_module.make_signature();
-                        for arg in args {
-                            sig.params.push(AbiParam::new(
-                                self.to_cranelift_type(&self.type_of(ctx, arg).unwrap())
-                                    .unwrap(),
-                            ));
+                        {
+                            let ctx = &self
+                                .ctx
+                                .func_by_idx(fn_idx)
+                                .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
+                            for arg in args {
+                                sig.params.push(AbiParam::new(
+                                    self.to_cranelift_type(&self.type_of(ctx, arg).unwrap())
+                                        .unwrap(),
+                                ));
+                            }
                         }
 
                         let callee = self.compile_lvalue(
@@ -1108,12 +1132,13 @@ impl CodeGen {
                 right,
                 operator,
             } => {
-                let ctx = &self
-                    .ctx
-                    .func_by_idx(fn_idx)
-                    .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
-                let type_hint_left = self.type_of(ctx, left);
-                let type_hint_right = self.type_of(ctx, right);
+                let (type_hint_left, type_hint_right) = {
+                    let ctx = &self
+                        .ctx
+                        .func_by_idx(fn_idx)
+                        .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
+                    (self.type_of(ctx, left), self.type_of(ctx, right))
+                };
 
                 // Pointer arithmetic
                 match (type_hint_left.clone(), type_hint_right.clone()) {
@@ -1268,6 +1293,7 @@ impl CodeGen {
                     .ok_or(CodegenError::unknown_symbol(expr.span.clone(), val))?
                 {
                     Symbol::Local(var) => {
+                        let var = var.borrow();
                         let var_offset = ctx.locals().offset_of(&var.name);
                         Ok(builder.ins().stack_load(
                             member_ty,
@@ -1277,6 +1303,7 @@ impl CodeGen {
                     }
                     Symbol::Function(_) => unimplemented!(),
                     Symbol::Global(global) => {
+                        let global = global.borrow();
                         let data = self
                             .obj_module
                             .declare_data_in_func(global.id, builder.func);
@@ -1293,13 +1320,14 @@ impl CodeGen {
                 }
             }
             ExpressionKind::Cast { value, to } => {
-                let ctx = &self
-                    .ctx
-                    .func_by_idx(fn_idx)
-                    .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
-                let current_ty = self
-                    .type_of(ctx, value)
-                    .ok_or(CodegenError::unknown_cast_from(expr.span.clone()))?;
+                let current_ty = {
+                    let ctx = &self
+                        .ctx
+                        .func_by_idx(fn_idx)
+                        .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
+                    self.type_of(ctx, value)
+                        .ok_or(CodegenError::unknown_cast_from(expr.span.clone()))?
+                };
                 let val = self.compile_expr(builder, Some(current_ty.clone()), value)?;
                 match (current_ty, to.clone()) {
                     (
@@ -1344,11 +1372,13 @@ impl CodeGen {
                 }
             }
             ExpressionKind::Index { value, at } => {
-                let ctx = &self
-                    .ctx
-                    .func_by_idx(fn_idx)
-                    .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
-                let ty = self.type_of(ctx, value).unwrap();
+                let ty = {
+                    let ctx = &self
+                        .ctx
+                        .func_by_idx(fn_idx)
+                        .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
+                    self.type_of(ctx, value).unwrap()
+                };
                 let TblType::Array { item, .. } = ty else {
                     unreachable!()
                 };
@@ -1384,27 +1414,36 @@ impl CodeGen {
         expr: &Expression,
     ) -> CodegenResult<Value> {
         let fn_idx = builder.func.name.get_user().unwrap().index;
-        let ctx = self
-            .ctx
-            .func_by_idx(fn_idx)
-            .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
         match &expr.kind {
             ExpressionKind::Var(v) => {
-                match ctx
-                    .scope
-                    .get(v)
-                    .ok_or(CodegenError::unknown_symbol(expr.span.clone(), v))?
-                {
+                let sym = {
+                    let ctx = self
+                        .ctx
+                        .func_by_idx(fn_idx)
+                        .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
+                    ctx.scope
+                        .get(v)
+                        .ok_or(CodegenError::unknown_symbol(expr.span.clone(), v))?
+                };
+                match sym {
                     Symbol::Local(var) => {
-                        let offset = ctx.locals().offset_of(&var.name);
+                        let var = var.borrow();
+                        let (offset, slot) = {
+                            let ctx = self
+                                .ctx
+                                .func_by_idx(fn_idx)
+                                .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
+                            (ctx.locals().offset_of(&var.name), ctx.locals().slot)
+                        };
                         Ok(builder.ins().stack_addr(
                             self.obj_module.isa().pointer_type(),
-                            ctx.locals().slot,
+                            slot,
                             Offset32::new(offset as i32),
                         ))
                     }
                     Symbol::Function(_) => todo!(),
                     Symbol::Global(global) => {
+                        let global = global.borrow();
                         let value = self
                             .obj_module
                             .declare_data_in_func(global.id, builder.func);
@@ -1415,7 +1454,13 @@ impl CodeGen {
                 }
             }
             ExpressionKind::StructAccess { value, member } => {
-                let ty = self.type_of(&ctx, value).unwrap();
+                let ty = {
+                    let ctx = self
+                        .ctx
+                        .func_by_idx(fn_idx)
+                        .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
+                    self.type_of(&ctx, value).unwrap()
+                };
                 let ty_members = &self.ctx.types[&ty.name()].unwrap_struct().members;
 
                 let offset = ty_members
@@ -1438,8 +1483,16 @@ impl CodeGen {
                 Ok(builder.ins().iadd(lhs, offset_val))
             }
             ExpressionKind::Index { value, at } => {
-                let TblType::Array { item, .. } = self.type_of(&ctx, value).unwrap() else {
-                    panic!()
+                let item = {
+                    let ctx = self
+                        .ctx
+                        .func_by_idx(fn_idx)
+                        .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
+
+                    let TblType::Array { item, .. } = self.type_of(&ctx, value).unwrap() else {
+                        panic!()
+                    };
+                    item
                 };
                 let addr = self.compile_lvalue(builder, value)?;
 
@@ -1467,7 +1520,16 @@ impl CodeGen {
             ExpressionKind::UnaryOperation {
                 value,
                 operator: UnaryOperator::Dereference,
-            } => self.compile_expr(builder, self.type_of(&ctx, value), value),
+            } => {
+                let ty = {
+                    let ctx = self
+                        .ctx
+                        .func_by_idx(fn_idx)
+                        .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
+                    self.type_of(&ctx, value)
+                };
+                self.compile_expr(builder, ty, value)
+            }
             e => Err(CodegenError::illegal_lvalue(expr.span.clone(), e.clone())),
         }
     }
@@ -1492,12 +1554,21 @@ impl CodeGen {
                 },
             },
             ExpressionKind::Var(v) => ctx.scope.get(v).map(|r| match r {
-                Symbol::Local(var) => var.type_.clone(),
-                Symbol::Function(fun) => TblType::TaskPtr {
-                    params: fun.params.iter().map(|(_, ty)| ty.clone()).collect(),
-                    returns: fun.returns.clone().map(Box::new),
-                },
-                Symbol::Global(global) => global.type_.clone(),
+                Symbol::Local(var) => {
+                    let var = var.borrow();
+                    var.type_.clone()
+                }
+                Symbol::Function(fun) => {
+                    let fun = fun.borrow();
+                    TblType::TaskPtr {
+                        params: fun.params.iter().map(|(_, ty)| ty.clone()).collect(),
+                        returns: fun.returns.clone().map(Box::new),
+                    }
+                }
+                Symbol::Global(global) => {
+                    let global = global.borrow();
+                    global.type_.clone()
+                }
             }),
             ExpressionKind::Call { task, .. } => match &task.kind {
                 ExpressionKind::Var(t) => self.ctx.get_function(t).unwrap().returns.clone(),
@@ -1563,19 +1634,12 @@ impl CodeGen {
                 TypeContext::Enum(_) => Some(types::I8),
             },
             TblType::TaskPtr { .. } => Some(self.obj_module.target_config().pointer_type()),
+            TblType::Handle => Some(self.obj_module.target_config().pointer_type()),
         }
     }
 
     fn type_size(&self, type_: &TblType) -> u32 {
         self.ctx
             .type_size(type_, self.obj_module.isa().pointer_bytes() as usize) as u32
-        // match type_ {
-        //     TblType::Array { item, length } => self.type_size(item) * (*length as u32),
-        //     TblType::Named(name) => self
-        //         .ctx
-        //         .type_size(type_, self.obj_module.isa().pointer_bytes() as usize)
-        //         as u32,
-        //     t => self.to_cranelift_type(t).unwrap().bytes(),
-        // }
     }
 }

@@ -5,7 +5,7 @@ pub struct Program {
     pub declarations: Vec<Declaration>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Type {
     Any,
     Bool,
@@ -23,6 +23,7 @@ pub enum Type {
         params: Vec<Type>,
         returns: Option<Box<Type>>,
     },
+    Handle,
 }
 
 impl Type {
@@ -51,6 +52,7 @@ impl Type {
                     }
                 )
             }
+            Type::Handle => "handle".to_string(),
         }
     }
 }
@@ -314,7 +316,7 @@ impl Expression {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum BinaryOperator {
     Equal,
     Unequal,
@@ -330,7 +332,7 @@ pub enum BinaryOperator {
     Divide,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum UnaryOperator {
     Dereference,
     Not,

@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fmt::Debug};
+use std::{
+    cell::{Ref, RefCell, RefMut},
+    collections::HashMap,
+    fmt::Debug,
+    rc::Rc,
+};
 
 use cranelift::{
     codegen::ir::{immediates::Offset32, Block, InstBuilder, StackSlot, Value},
@@ -24,7 +29,7 @@ impl CodeGenContext {
         self.global_scope.insert_function(name, function);
     }
 
-    pub fn func_by_idx(&self, idx: u32) -> Option<&FunctionContext> {
+    pub fn func_by_idx(&self, idx: u32) -> Option<Ref<'_, FunctionContext>> {
         self.global_scope.functions().find_map(|(_, f)| {
             if f.func_id.as_u32() == idx {
                 Some(f)
@@ -34,7 +39,7 @@ impl CodeGenContext {
         })
     }
 
-    pub fn func_by_idx_mut(&mut self, idx: u32) -> Option<&mut FunctionContext> {
+    pub fn func_by_idx_mut(&mut self, idx: u32) -> Option<RefMut<'_, FunctionContext>> {
         self.global_scope.functions_mut().find_map(|(_, f)| {
             if f.func_id.as_u32() == idx {
                 Some(f)
@@ -44,13 +49,13 @@ impl CodeGenContext {
         })
     }
 
-    pub fn get_function(&self, name: &str) -> Option<&FunctionContext> {
+    pub fn get_function(&self, name: &str) -> Option<Ref<'_, FunctionContext>> {
         self.global_scope
             .functions()
             .find_map(|(n, f)| if n == name { Some(f) } else { None })
     }
 
-    pub fn get_function_mut(&mut self, name: &str) -> Option<&mut FunctionContext> {
+    pub fn get_function_mut(&mut self, name: &str) -> Option<RefMut<'_, FunctionContext>> {
         self.global_scope
             .functions_mut()
             .find_map(|(n, f)| if n == name { Some(f) } else { None })
@@ -85,6 +90,7 @@ impl CodeGenContext {
                 }
             },
             TblType::TaskPtr { .. } => ptr_size,
+            TblType::Handle => ptr_size,
         }
     }
 
@@ -170,22 +176,22 @@ impl CodeGenContext {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Symbol {
-    Local(Local),
-    Function(FunctionContext),
-    Global(GlobalContext),
+    Local(Rc<RefCell<Local>>),
+    Function(Rc<RefCell<FunctionContext>>),
+    Global(Rc<RefCell<GlobalContext>>),
 }
 
 impl Symbol {
     pub fn type_(&self) -> TblType {
         match self {
-            Symbol::Local(l) => l.type_.clone(),
+            Symbol::Local(l) => l.borrow().type_.clone(),
             Symbol::Function(f) => TblType::TaskPtr {
-                params: f.params.iter().map(|(_, t)| t).cloned().collect(),
-                returns: f.returns.clone().map(Box::new),
+                params: f.borrow().params.iter().map(|(_, t)| t).cloned().collect(),
+                returns: f.borrow().returns.clone().map(Box::new),
             },
-            Symbol::Global(g) => g.type_.clone(),
+            Symbol::Global(g) => g.borrow().type_.clone(),
         }
     }
 }
@@ -235,7 +241,7 @@ impl StructContext {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FunctionContext {
     pub params: Vec<(String, TblType)>,
     pub returns: Option<TblType>,
@@ -267,7 +273,7 @@ impl FunctionContext {
             is_external,
             span,
             loop_labels: vec![],
-            scope: parent.create_child(),
+            scope: Scope::create_child(parent),
         }
     }
 
@@ -328,14 +334,14 @@ impl FunctionContext {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Local {
     pub name: String,
     pub type_: TblType,
     pub size: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Locals {
     pub slot: StackSlot,
     pub vars: Vec<Local>,
@@ -355,7 +361,7 @@ impl Locals {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalContext {
     pub id: cranelift_module::DataId,
     pub type_: TblType,
@@ -391,57 +397,78 @@ impl EnumContext {
     }
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct Scope {
     parent: Option<Box<Scope>>,
     variables: HashMap<String, Symbol>,
 }
 
 impl Scope {
-    pub fn create_child(&self) -> Self {
+    // pub fn create_child(self: Rc<Self>) -> Self {
+    //     Scope {
+    //         parent: Some(Rc::clone(&self)),
+    //         ..Default::default()
+    //     }
+    // }
+
+    pub fn create_child(parent: Self) -> Self {
         Scope {
-            parent: Some(Box::new(self.clone())),
+            parent: Some(Box::new(parent)),
             ..Default::default()
         }
     }
 
-    pub fn get<S: AsRef<str>>(&self, key: S) -> Option<&Symbol> {
+    pub fn get<S: AsRef<str>>(&self, key: S) -> Option<Symbol> {
         match self.variables.get(key.as_ref()) {
-            Some(value) => Some(value),
+            Some(value) => Some(value.clone()),
             None => self.parent.as_ref().map(|p| p.get(key.as_ref())).flatten(),
         }
     }
 
+    pub fn symbols(&self) -> HashMap<String, Symbol> {
+        let mut symbols = HashMap::new();
+        match &self.parent {
+            Some(p) => {
+                for (name, sym) in p.symbols() {
+                    symbols.insert(name, sym);
+                }
+                for (name, sym) in self.variables.iter() {
+                    symbols.insert(name.clone(), sym.clone());
+                }
+            }
+            None => {
+                symbols = self.variables.clone();
+            }
+        }
+        symbols
+    }
+
     pub fn insert_global(&mut self, key: impl Into<String>, value: GlobalContext) {
-        self.variables.insert(key.into(), Symbol::Global(value));
+        self.variables
+            .insert(key.into(), Symbol::Global(Rc::new(RefCell::new(value))));
     }
 
     pub fn insert_local(&mut self, key: impl Into<String>, value: Local) {
         let key = key.into();
-        self.variables.insert(key.into(), Symbol::Local(value));
+        self.variables
+            .insert(key.into(), Symbol::Local(Rc::new(RefCell::new(value))));
     }
 
     pub fn insert_function(&mut self, key: impl Into<String>, value: FunctionContext) {
-        self.variables.insert(key.into(), Symbol::Function(value));
+        self.variables
+            .insert(key.into(), Symbol::Function(Rc::new(RefCell::new(value))));
     }
 
-    pub fn functions(&self) -> impl Iterator<Item = (&str, &FunctionContext)> {
+    pub fn functions(&self) -> impl Iterator<Item = (&str, Ref<'_, FunctionContext>)> {
         self.variables.iter().filter_map(|(n, v)| match v {
-            Symbol::Function(f) => Some((n.as_str(), f)),
+            Symbol::Function(f) => Some((n.as_str(), f.borrow())),
             _ => None,
         })
     }
 
-    pub fn functions_mut(&mut self) -> impl Iterator<Item = (&str, &mut FunctionContext)> {
+    pub fn functions_mut(&mut self) -> impl Iterator<Item = (&str, RefMut<'_, FunctionContext>)> {
         self.variables.iter_mut().filter_map(|(n, v)| match v {
-            Symbol::Function(f) => Some((n.as_str(), f)),
-            _ => None,
-        })
-    }
-
-    pub fn globals(&self) -> impl Iterator<Item = (&str, &GlobalContext)> {
-        self.variables.iter().filter_map(|(n, v)| match v {
-            Symbol::Global(g) => Some((n.as_str(), g)),
+            Symbol::Function(f) => Some((n.as_str(), f.borrow_mut())),
             _ => None,
         })
     }

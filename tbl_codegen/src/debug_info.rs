@@ -102,7 +102,7 @@ impl DebugInfoGenerator {
         self.generate_primitive_types();
 
         for (_, func) in ctx.global_scope.functions() {
-            self.generate_function_di(func, object, ctx);
+            self.generate_function_di(&func, object, ctx);
         }
 
         let mut sections = Sections::new(DebugInfoWriter::new(RunTimeEndian::Little));
