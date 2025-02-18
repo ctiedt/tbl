@@ -66,20 +66,20 @@ impl TblAnalyzer {
         let program = &self.program.program;
         for decl in &program.declarations {
             let mut referenced_vars = vec![];
-            if let DeclarationKind::Task { locals, body, .. } = &decl.kind {
+            if let DeclarationKind::Task { body, .. } = &decl.kind {
                 for stmt in body {
                     referenced_vars.extend(stmt.referenced_vars());
                 }
                 let ref_names: Vec<_> = referenced_vars.iter().map(|(name, _)| *name).collect();
-                for (local, _) in locals {
-                    if !ref_names.contains(&local.as_str()) {
-                        diagnostics.push(Diagnostic {
-                            span: decl.span.clone(),
-                            level: DiagnosticLevel::Warning,
-                            message: format!("Local `{local}` is never used"),
-                        })
-                    }
-                }
+                // for (local, _) in locals {
+                //     if !ref_names.contains(&local.as_str()) {
+                //         diagnostics.push(Diagnostic {
+                //             span: decl.span.clone(),
+                //             level: DiagnosticLevel::Warning,
+                //             message: format!("Local `{local}` is never used"),
+                //         })
+                //     }
+                // }
             }
         }
         diagnostics
@@ -107,15 +107,8 @@ impl TblAnalyzer {
             if let DeclarationKind::Global { name, .. } = &decl.kind {
                 globals.push(name.as_str());
             }
-            if let DeclarationKind::Task {
-                params,
-                locals,
-                body,
-                ..
-            } = &decl.kind
-            {
+            if let DeclarationKind::Task { params, body, .. } = &decl.kind {
                 let mut vars: Vec<_> = params.iter().map(|(p, _)| p.as_str()).collect();
-                vars.extend(locals.iter().map(|(l, _)| l.as_str()));
                 for stmt in body {
                     for (var, span) in stmt.referenced_vars() {
                         if !(vars.contains(&var)

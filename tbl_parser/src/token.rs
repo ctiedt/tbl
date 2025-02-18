@@ -38,6 +38,9 @@ pub enum Token<'a> {
     #[token("schedule")]
     Schedule,
 
+    #[token("every")]
+    Every,
+
     #[token("exit")]
     Exit,
 
@@ -55,6 +58,21 @@ pub enum Token<'a> {
 
     #[token("use")]
     Use,
+
+    #[token("ms")]
+    Ms,
+
+    #[token("let")]
+    Let,
+
+    #[token("uninit")]
+    Uninit,
+
+    #[token("on")]
+    On,
+
+    #[token("do")]
+    Do,
 
     #[regex(r"([iu])(8|16|32|64)")]
     IntType(&'a str),
@@ -176,12 +194,18 @@ impl<'a> Display for Token<'a> {
                 Token::Match => "match".to_string(),
                 Token::Break => "break".to_string(),
                 Token::Schedule => "schedule".to_string(),
+                Token::Every => "every".to_string(),
                 Token::Exit => "exit".to_string(),
                 Token::Return => "return".to_string(),
                 Token::True => "true".to_string(),
                 Token::False => "false".to_string(),
                 Token::As => "as".to_string(),
                 Token::Use => "use".to_string(),
+                Token::Ms => "ms".to_string(),
+                Token::Let => "let".to_string(),
+                Token::Uninit => "uninit".to_string(),
+                Token::On => "on".to_string(),
+                Token::Do => "do".to_string(),
                 Token::IntType(t) => t.to_string(),
                 Token::Ident(id) => id.to_string(),
                 Token::Varargs => "...".to_string(),

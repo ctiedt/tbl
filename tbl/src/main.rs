@@ -1,4 +1,4 @@
-use std::{panic::PanicInfo, path::PathBuf, sync::Arc};
+use std::{panic::PanicHookInfo, path::PathBuf, sync::Arc};
 
 use ariadne::Label;
 use clap::Parser as ArgParser;
@@ -109,7 +109,7 @@ fn link<S: AsRef<str>>(
     Ok(())
 }
 
-fn report_compiler_panic(info: &PanicInfo) {
+fn report_compiler_panic(info: &PanicHookInfo) {
     let commit_hash = match std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()

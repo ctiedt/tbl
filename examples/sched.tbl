@@ -1,22 +1,31 @@
 use std;
 
+extern task time(t: &u32);
+
 global n: u32 = 42;
 
-task foo(n: &u32) {
-    printf("Hello, foo %d\n", *n);
+task foo(n: &u32)
+ {
+	let t: u32 = 0;
+    time(&t);
+    printf("Hello, foo %d at %d\n", *n, t);
     *n = *n + 1;
     return;
 }
 
-task bar(n: &u32) {
-    printf("Hello, bar %d\n", *n);
+task bar(n: &u32)
+ {
+	let t: u32 = 0;
+    time(&t);
+    printf("Hello, bar %d at %d\n", *n, t);
     *n = *n + 1;
     return;
 }
 
 task main() -> i32 
 {
-    schedule foo(&n);
-    schedule bar(&n);
+    let t1: handle = schedule foo(&n) every 500ms;
+    printf("%d\n", t1);
+    schedule bar(&n) every 1000ms;
     return 0;
 }

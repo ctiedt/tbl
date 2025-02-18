@@ -91,6 +91,7 @@ impl CodeGenContext {
             },
             TblType::TaskPtr { .. } => ptr_size,
             TblType::Handle => ptr_size,
+            TblType::Duration => 8,
         }
     }
 

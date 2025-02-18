@@ -49,6 +49,8 @@ pub enum ParseErrorKind {
     ParseIntError(#[from] ParseIntError),
     #[error("expected identifier")]
     ExpectedIdent,
+    #[error("expected type")]
+    ExpectedType,
 }
 
 pub type ParseResult<T> = Result<Option<T>, ParseError>;

@@ -1,6 +1,7 @@
 global AF_INET: u32 = 2;
 global SOCK_DGRAM: u32 = 2;
 global INADDR_ANY: u32 = 0;
+global MSG_DONTWAIT: u32 = 64;
 
 struct in_addr {
     s_addr: u32
@@ -17,3 +18,4 @@ extern task socket(__domain: u32, __type: u32, __protocol: u32) -> u32;
 extern task htons(in: u16) -> u16;
 extern task bind(fd: u32, addr: &any, len: u64) -> u32;
 extern task recv(sock: u32, buffer: &char, length: u32, flags: u32) -> u32;
+extern task send(sock: u32, buffer: &char, length: u32, flags: u32) -> u32;

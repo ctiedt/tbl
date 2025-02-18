@@ -40,6 +40,15 @@ task main() -> u32
 		}
 	}
 
+	match p {
+		TwoD { x, y } -> {
+			printf("(%d, %d)\n", x, y);
+		}
+		ThreeD { x, y, z } -> {
+			printf("(%d, %d, %d)\n", x, y, z);
+		}
+	}
+
 	printf("After match\n");
 	return 0;
 }

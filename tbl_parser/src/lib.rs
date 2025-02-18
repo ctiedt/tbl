@@ -439,7 +439,6 @@ impl<'a> Parser<'a> {
     pub fn parse_task(&mut self) -> ParseResult<types::Declaration> {
         let start = self.current_span().start;
         let mut params = vec![];
-        let mut locals = vec![];
         let mut returns = None;
         if self.accept(Token::Task)?.is_none() {
             return Ok(None);
@@ -463,15 +462,6 @@ impl<'a> Parser<'a> {
             returns.replace(self.parse_ty()?.unwrap());
         }
 
-        if self.accept(Token::LessThan)?.is_some() {
-            while let Some(local) = self.parse_param()? {
-                locals.push(local);
-                if self.accept(Token::Comma)?.is_none() {
-                    self.require(Token::GreaterThan)?;
-                }
-            }
-        }
-
         let mut body = vec![];
         self.require(Token::CurlyOpen)?;
 
@@ -487,7 +477,6 @@ impl<'a> Parser<'a> {
                 name,
                 params,
                 returns,
-                locals,
                 body,
             }
             .with_span(start..end),
@@ -504,6 +493,14 @@ impl<'a> Parser<'a> {
             Ok(Some((name, ty)))
         } else {
             Ok(None)
+        }
+    }
+
+    fn parse_ident(&mut self) -> Result<String, ParseError> {
+        if let Some(ident) = self.accept(IdentPattern)? {
+            Ok(ident.to_string())
+        } else {
+            Err(self.error(ParseErrorKind::ExpectedIdent))
         }
     }
 
@@ -538,6 +535,12 @@ impl<'a> Parser<'a> {
         }
         if self.accept(Token::Ident("any"))?.is_some() {
             return Ok(Some(Type::Any));
+        }
+        if self.accept(Token::Ident("duration"))?.is_some() {
+            return Ok(Some(Type::Duration));
+        }
+        if self.accept(Token::Ident("handle"))?.is_some() {
+            return Ok(Some(Type::Handle));
         }
         if self.accept(Token::Task)?.is_some() {
             let mut params = vec![];
@@ -625,19 +628,19 @@ impl<'a> Parser<'a> {
             let test = self
                 .parse_expr()?
                 .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
-            self.require(Token::CurlyOpen)?;
+            // self.require(Token::CurlyOpen)?;
             let mut then = vec![];
             let mut else_ = vec![];
             while let Some(stmt) = self.parse_stmt()? {
                 then.push(stmt);
             }
-            self.require(Token::CurlyClose)?;
+            // self.require(Token::CurlyClose)?;
             if self.accept(Token::Else)?.is_some() {
-                self.require(Token::CurlyOpen)?;
+                // self.require(Token::CurlyOpen)?;
                 while let Some(stmt) = self.parse_stmt()? {
                     else_.push(stmt);
                 }
-                self.require(Token::CurlyClose)?;
+                // self.require(Token::CurlyClose)?;
             }
             let end = self.current_span().end;
             return Ok(Some(
@@ -694,30 +697,46 @@ impl<'a> Parser<'a> {
             let end = self.current_span().end;
             return Ok(Some(StatementKind::Break.with_span(start..end)));
         }
-        if self.accept(Token::Schedule)?.is_some() {
-            let task = self
-                .require(IdentPattern)?
-                .ok_or(self.error(ParseErrorKind::ExpectedIdent))?
-                .to_string();
-
-            let mut args = vec![];
-            self.require(Token::ParenOpen)?;
-            let mut no_params = true;
-            while let Some(param) = self.parse_expr()? {
-                no_params = false;
-                args.push(param);
-                if self.accept(Token::Comma)?.is_none() {
-                    self.require(Token::ParenClose)?;
-                }
-            }
-            if no_params {
-                self.require(Token::ParenClose)?;
-            }
-
+        if self.accept(Token::Let)?.is_some() {
+            let name = self.parse_ident()?;
+            self.require(Token::Colon)?;
+            let type_ = self
+                .parse_ty()?
+                .ok_or(self.error(ParseErrorKind::ExpectedType))?;
+            self.require(Token::Equals)?;
+            let value = self
+                .parse_expr()?
+                .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
             self.require(Token::Semicolon)?;
             let end = self.current_span().end;
             return Ok(Some(
-                StatementKind::Schedule { task, args }.with_span(start..end),
+                StatementKind::Definition { name, type_, value }.with_span(start..end),
+            ));
+        }
+        if self.accept(Token::Uninit)?.is_some() {
+            let name = self.parse_ident()?;
+            self.require(Token::Colon)?;
+            let type_ = self
+                .parse_ty()?
+                .ok_or(self.error(ParseErrorKind::ExpectedType))?;
+            self.require(Token::Semicolon)?;
+            let end = self.current_span().end;
+            return Ok(Some(
+                StatementKind::Declaration { name, type_ }.with_span(start..end),
+            ));
+        }
+        if self.accept(Token::On)?.is_some() {
+            let handle = self
+                .parse_expr()?
+                .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
+            self.require(Token::Do)?;
+            let task = self
+                .parse_expr()?
+                .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
+            self.require(Token::Semicolon)?;
+            let end = self.current_span().end;
+            return Ok(Some(
+                StatementKind::Attach { handle, task }.with_span(start..end),
             ));
         }
         if let Some(expr) = self.parse_expr()? {
@@ -760,6 +779,38 @@ impl<'a> Parser<'a> {
 
     fn parse_expr(&mut self) -> ParseResult<Expression> {
         let start = self.current_span().start;
+        if self.accept(Token::Schedule)?.is_some() {
+            let task = self
+                .require(IdentPattern)?
+                .ok_or(self.error(ParseErrorKind::ExpectedIdent))?
+                .to_string();
+
+            let mut args = vec![];
+            self.require(Token::ParenOpen)?;
+            let mut no_params = true;
+            while let Some(param) = self.parse_expr()? {
+                no_params = false;
+                args.push(param);
+                if self.accept(Token::Comma)?.is_none() {
+                    self.require(Token::ParenClose)?;
+                }
+            }
+            if no_params {
+                self.require(Token::ParenClose)?;
+            }
+
+            self.require(Token::Every)?;
+
+            let period = Box::new(
+                self.parse_expr()?
+                    .ok_or(self.error(ParseErrorKind::ExpectedExpression))?,
+            );
+
+            let end = self.current_span().end;
+            return Ok(Some(
+                ExpressionKind::Schedule { task, args, period }.with_span(start..end),
+            ));
+        }
         if let Some(left) = self.parse_comparison()? {
             if let Some(op) = self.accept([Token::DoubleEqual, Token::Unequal].as_slice())? {
                 let operator = match op {
@@ -1059,7 +1110,11 @@ impl<'a> Parser<'a> {
             return Ok(Some(Literal::Bool(false)));
         }
         if let Some(n) = self.parse_int()? {
-            return Ok(Some(Literal::Int(n as i64)));
+            if self.accept(Token::Ms)?.is_some() {
+                return Ok(Some(Literal::Time(n)));
+            } else {
+                return Ok(Some(Literal::Int(n as i64)));
+            }
         }
         // if self.accept(Token::CurlyOpen)?.is_some() {
         //     let mut members = vec![];

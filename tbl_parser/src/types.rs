@@ -9,6 +9,7 @@ pub struct Program {
 pub enum Type {
     Any,
     Bool,
+    Duration,
     Integer {
         signed: bool,
         width: u8,
@@ -31,6 +32,7 @@ impl Type {
         match self {
             Type::Any => "any".to_string(),
             Type::Bool => "bool".to_string(),
+            Type::Duration => "duration".to_string(),
             Type::Integer { signed, width } => {
                 format!("{}{width}", if *signed { "i" } else { "u" })
             }
@@ -93,7 +95,6 @@ pub enum DeclarationKind {
         name: String,
         params: Vec<(String, Type)>,
         returns: Option<Type>,
-        locals: Vec<(String, Type)>,
         body: Vec<Statement>,
     },
     Struct {
@@ -150,13 +151,18 @@ pub enum StatementKind {
     Exit,
     Expression(Expression),
     Return(Option<Expression>),
-    Schedule {
-        task: String,
-        args: Vec<Expression>,
-    },
     Assign {
         location: Expression,
         value: Expression,
+    },
+    Definition {
+        name: String,
+        type_: Type,
+        value: Expression,
+    },
+    Declaration {
+        name: String,
+        type_: Type,
     },
     Loop {
         body: Vec<Statement>,
@@ -169,6 +175,10 @@ pub enum StatementKind {
         branches: Vec<(MatchPattern, Statement)>,
     },
     Break,
+    Attach {
+        handle: Expression,
+        task: Expression,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,18 +216,17 @@ impl Statement {
                     vec![]
                 }
             }
-            StatementKind::Schedule { args, .. } => {
-                let mut vars = vec![];
-                for arg in args {
-                    vars.extend(arg.referenced_vars());
-                }
-                vars
-            }
             StatementKind::Assign { location, value } => {
                 let mut vars = location.referenced_vars();
                 vars.extend(value.referenced_vars());
                 vars
             }
+            StatementKind::Definition {
+                name: _,
+                type_: _,
+                value,
+            } => value.referenced_vars(),
+            StatementKind::Declaration { .. } => vec![],
             StatementKind::Loop { body } => {
                 let mut vars = vec![];
                 for stmt in body {
@@ -237,6 +246,11 @@ impl Statement {
                 for (_, stmt) in branches {
                     vars.append(&mut stmt.referenced_vars());
                 }
+                vars
+            }
+            StatementKind::Attach { handle, task } => {
+                let mut vars = handle.referenced_vars();
+                vars.extend(task.referenced_vars());
                 vars
             }
             StatementKind::Break => vec![],
@@ -282,6 +296,11 @@ pub enum ExpressionKind {
     SizeOf {
         value: Type,
     },
+    Schedule {
+        task: String,
+        args: Vec<Expression>,
+        period: Box<Expression>,
+    },
 }
 
 impl ExpressionKind {
@@ -312,6 +331,13 @@ impl Expression {
             ExpressionKind::Cast { value, .. } => value.referenced_vars(),
             ExpressionKind::Index { value, .. } => value.referenced_vars(),
             ExpressionKind::SizeOf { .. } => vec![],
+            ExpressionKind::Schedule { args, .. } => {
+                let mut vars = vec![];
+                for arg in args {
+                    vars.extend(arg.referenced_vars());
+                }
+                vars
+            }
         }
     }
 }
@@ -347,6 +373,7 @@ pub enum Literal {
     Bool(bool),
     Struct(Vec<(String, Expression)>),
     Array(Vec<Expression>),
+    Time(u64),
     Enum {
         variant: String,
         members: Vec<(String, Expression)>,

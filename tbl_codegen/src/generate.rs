@@ -153,7 +153,6 @@ impl CodeGen {
                 name,
                 params,
                 returns,
-                locals,
                 body,
             } => {
                 let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
@@ -199,7 +198,9 @@ impl CodeGen {
                 func_builder.seal_block(fn_entry);
 
                 let locals_size = params.iter().map(|(_, p)| self.type_size(p)).sum::<u32>()
-                    + locals.iter().map(|l| self.type_size(&l.1)).sum::<u32>();
+                    + self.task_stack_size(body);
+                // let locals_size = params.iter().map(|(_, p)| self.type_size(p)).sum::<u32>()
+                //     + locals.iter().map(|l| self.type_size(&l.1)).sum::<u32>();
                 let data = StackSlotData::new(StackSlotKind::ExplicitSlot, locals_size);
                 let locals_slot = func_builder.create_sized_stack_slot(data);
                 {
@@ -225,18 +226,6 @@ impl CodeGen {
                         .map_err(|e| CodegenError::new(decl.span.clone(), e))?;
                 }
 
-                for local in locals {
-                    let ty_size = self.type_size(&local.1);
-                    // let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
-                    let mut fn_ctx = self
-                        .ctx
-                        .get_function_mut(name)
-                        .ok_or(CodegenError::unknown_task(decl.span.clone(), name))?;
-                    fn_ctx
-                        .declare_local(&local.0, local.1.clone(), ty_size)
-                        .map_err(|e| CodegenError::new(decl.span.clone(), e))?;
-                }
-
                 for stmt in body {
                     self.compile_stmt(&mut func_builder, stmt)?;
                 }
@@ -250,7 +239,8 @@ impl CodeGen {
                 }
 
                 func_builder.seal_all_blocks();
-                // info!("{}", func_builder.func.display());
+                info!("{}", name);
+                info!("{}", func_builder.func.display());
                 func_builder.finalize();
 
                 let mut ctx = Context::for_function(func);
@@ -626,65 +616,6 @@ impl CodeGen {
                 }
                 func_builder.ins().return_(&return_values);
             }
-            StatementKind::Schedule { task, args } => {
-                let ty_name = format!("__{task}_args");
-                let arg_ty = self
-                    .ctx
-                    .types
-                    .get(&ty_name)
-                    .unwrap()
-                    .unwrap_struct()
-                    .clone();
-                let arg_tbl_ty = TblType::Named(ty_name.clone());
-                let ty_size = self.type_size(&arg_tbl_ty);
-
-                let data = StackSlotData::new(StackSlotKind::ExplicitSlot, ty_size);
-                let slot = func_builder.create_sized_stack_slot(data);
-                let addr = func_builder.ins().stack_addr(
-                    self.obj_module.isa().pointer_type(),
-                    slot,
-                    Offset32::new(0),
-                );
-
-                for (
-                    arg,
-                    StructMember {
-                        offset,
-                        name: _,
-                        type_,
-                    },
-                ) in args.iter().zip(&arg_ty.members)
-                {
-                    self.store_expr(func_builder, type_, addr, *offset as i32, arg)?;
-                }
-
-                let task_name = format!("__{task}_wrapper");
-                // let called_task_ctx = self.ctx.functions.get(&task_name).unwrap();
-                let called_task_ctx = self
-                    .ctx
-                    .get_function(&task_name)
-                    .ok_or(CodegenError::unknown_task(stmt.span.clone(), &task_name))?;
-                let called_task = self
-                    .obj_module
-                    .declare_func_in_func(called_task_ctx.func_id, func_builder.func);
-                let called_task_addr = func_builder
-                    .ins()
-                    .func_addr(self.obj_module.isa().pointer_type(), called_task);
-
-                let args_size = func_builder
-                    .ins()
-                    .iconst(self.obj_module.isa().pointer_type(), ty_size as i64);
-
-                // let sched_enqeue_ctx = self.ctx.functions.get("sched_enqueue").unwrap();
-                let sched_enqueue_ctx = self.ctx.get_function("sched_enqueue").unwrap();
-                let sched_enqueue = self
-                    .obj_module
-                    .declare_func_in_func(sched_enqueue_ctx.func_id, func_builder.func);
-
-                func_builder
-                    .ins()
-                    .call(sched_enqueue, &[called_task_addr, addr, args_size]);
-            }
             StatementKind::Assign { location, value } => {
                 let type_ = {
                     let ctx = self
@@ -695,6 +626,24 @@ impl CodeGen {
                 };
                 let loc = self.compile_lvalue(func_builder, location)?;
                 self.store_expr(func_builder, &type_, loc, 0, value)?;
+            }
+            StatementKind::Definition { name, type_, value } => {
+                let val = self.compile_expr(func_builder, Some(type_.clone()), value)?;
+                let size = self.type_size(type_);
+                let mut ctx = self
+                    .ctx
+                    .func_by_idx_mut(fn_idx)
+                    .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
+                ctx.define_local(func_builder, name, type_.clone(), size, val)
+                    .unwrap();
+            }
+            StatementKind::Declaration { name, type_ } => {
+                let size = self.type_size(type_);
+                let mut ctx = self
+                    .ctx
+                    .func_by_idx_mut(fn_idx)
+                    .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
+                ctx.declare_local(name, type_.clone(), size).unwrap();
             }
             StatementKind::Loop { body } => {
                 let block = func_builder.create_block();
@@ -791,6 +740,19 @@ impl CodeGen {
                     .last()
                     .ok_or(CodegenError::empty_loop_stack(stmt.span.clone()))?;
                 func_builder.ins().jump(*block, &[]);
+            }
+            StatementKind::Attach { handle, task } => {
+                let handle_val = self.compile_expr(func_builder, Some(TblType::Handle), handle)?;
+                let task_val = self.compile_expr(func_builder, None, task)?;
+
+                let sched_attach_ctx = self.ctx.get_function("sched_attach").unwrap();
+                let sched_attach = self
+                    .obj_module
+                    .declare_func_in_func(sched_attach_ctx.func_id, func_builder.func);
+
+                func_builder
+                    .ins()
+                    .call(sched_attach, &[handle_val, task_val]);
             }
         }
         Ok(())
@@ -905,6 +867,7 @@ impl CodeGen {
                         Err(CodegenError::missing_type_hint(expr.span.clone()))
                     }
                 }
+                Literal::Time(t) => Ok(builder.ins().iconst(types::I64, *t as i64)),
                 Literal::String(s) => {
                     let data_id = self
                         .obj_module
@@ -1405,6 +1368,72 @@ impl CodeGen {
                 self.obj_module.isa().pointer_type(),
                 self.type_size(value) as i64,
             )),
+            ExpressionKind::Schedule { task, args, period } => {
+                let ty_name = format!("__{task}_args");
+                let arg_ty = self
+                    .ctx
+                    .types
+                    .get(&ty_name)
+                    .unwrap()
+                    .unwrap_struct()
+                    .clone();
+                let arg_tbl_ty = TblType::Named(ty_name.clone());
+                let ty_size = self.type_size(&arg_tbl_ty);
+
+                let period_val = self.compile_expr(builder, Some(TblType::Duration), period)?;
+
+                let data = StackSlotData::new(StackSlotKind::ExplicitSlot, ty_size);
+                let slot = builder.create_sized_stack_slot(data);
+                let addr = builder.ins().stack_addr(
+                    self.obj_module.isa().pointer_type(),
+                    slot,
+                    Offset32::new(0),
+                );
+
+                for (
+                    arg,
+                    StructMember {
+                        offset,
+                        name: _,
+                        type_,
+                    },
+                ) in args.iter().zip(&arg_ty.members)
+                {
+                    self.store_expr(builder, type_, addr, *offset as i32, arg)?;
+                }
+
+                let task_name = format!("__{task}_wrapper");
+                // let called_task_ctx = self.ctx.functions.get(&task_name).unwrap();
+                let called_task_ctx = self
+                    .ctx
+                    .get_function(&task_name)
+                    .ok_or(CodegenError::unknown_task(expr.span.clone(), &task_name))?;
+                let called_task = self
+                    .obj_module
+                    .declare_func_in_func(called_task_ctx.func_id, builder.func);
+                let called_task_addr = builder
+                    .ins()
+                    .func_addr(self.obj_module.isa().pointer_type(), called_task);
+
+                let args_size = builder
+                    .ins()
+                    .iconst(self.obj_module.isa().pointer_type(), ty_size as i64);
+
+                // let sched_enqeue_ctx = self.ctx.functions.get("sched_enqueue").unwrap();
+                let sched_enqueue_ctx = self.ctx.get_function("sched_enqueue").unwrap();
+                let sched_enqueue = self
+                    .obj_module
+                    .declare_func_in_func(sched_enqueue_ctx.func_id, builder.func);
+
+                let call_inst = builder.ins().call(
+                    sched_enqueue,
+                    &[called_task_addr, addr, args_size, period_val],
+                );
+
+                let res = builder.inst_results(call_inst)[0];
+
+                Ok(res)
+            }
         }
     }
 
@@ -1538,6 +1567,7 @@ impl CodeGen {
         match &value.kind {
             ExpressionKind::Literal(l) => match l {
                 Literal::Int(_) => None,
+                Literal::Time(_) => Some(TblType::Duration),
                 Literal::String(_) => Some(TblType::Pointer(Box::new(TblType::Integer {
                     signed: false,
                     width: 8,
@@ -1615,6 +1645,7 @@ impl CodeGen {
                 signed: false,
                 width: self.obj_module.isa().pointer_bits(),
             }),
+            ExpressionKind::Schedule { .. } => Some(TblType::Handle),
         }
     }
 
@@ -1635,11 +1666,28 @@ impl CodeGen {
             },
             TblType::TaskPtr { .. } => Some(self.obj_module.target_config().pointer_type()),
             TblType::Handle => Some(self.obj_module.target_config().pointer_type()),
+            TblType::Duration => Some(types::I64),
         }
     }
 
     fn type_size(&self, type_: &TblType) -> u32 {
         self.ctx
             .type_size(type_, self.obj_module.isa().pointer_bytes() as usize) as u32
+    }
+
+    fn task_stack_size(&self, func: &Vec<Statement>) -> u32 {
+        let mut size = 0;
+        for stmt in func {
+            match &stmt.kind {
+                StatementKind::Definition { type_, .. } => {
+                    size += self.type_size(type_);
+                }
+                StatementKind::Declaration { type_, .. } => {
+                    size += self.type_size(type_);
+                }
+                _ => {}
+            }
+        }
+        size
     }
 }

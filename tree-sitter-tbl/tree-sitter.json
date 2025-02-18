@@ -1,0 +1,38 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "tbl",
+      "camelcase": "TBL",
+      "title": "Task Based Language",
+      "scope": "source.tbl",
+      "file-types": [
+        "tbl"
+      ],
+      "injection-regex": "^tbl$",
+      "class-name": "TreeSitterTbl"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Tbl grammar for tree-sitter",
+    "authors": [
+      {
+        "name": "Clemens Tiedt"
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/ctiedt/tbl"
+    }
+  },
+  "bindings": {
+    "c": true,
+    "go": true,
+    "node": true,
+    "python": true,
+    "rust": true,
+    "swift": true,
+    "zig": false
+  }
+}

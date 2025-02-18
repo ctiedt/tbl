@@ -1,70 +1,13 @@
-extern task memcpy(dest: &any, src: &any, n: u64);
-extern task memset(dest: &any, value: u32, n: u64);
 extern task printf(...);
-extern task putchar(c: u32);
-extern task malloc(size: u64) -> &any;
-extern task usleep(time: u32);
 
-task tbl_sleep(time: u32) {
-    usleep(time * 1000); 
-    return;
-}
-
-struct Task {
-    task_: task(&any) -> &any,
-    args: &any,
-    running: bool
-}
-
-struct Scheduler {
-    tasks: [Task; 64],
-    num_tasks: i64,
-    current: i64
-}
-
-global SCHED: Scheduler = {tasks: [], num_tasks: 0, current: -1};
-global TASK_EXITED: bool = false;
-
-task sched_enqueue(task_: task(&any) -> &any, args: &any, arg_size: u64)
-<arg_ptr: &any>
-{
-    arg_ptr = malloc(arg_size);
-    SCHED.tasks[SCHED.num_tasks].task_ = task_;
-    memcpy(arg_ptr, args, arg_size);
-    SCHED.tasks[SCHED.num_tasks].args = arg_ptr;
-    SCHED.tasks[SCHED.num_tasks].running = true;
-    SCHED.num_tasks = SCHED.num_tasks + 1;
-    if SCHED.current == -1 {
-        SCHED.current = 0;
-    }
-}
+extern task sched_enqueue(task_: task(&any) -> &any, args: &any, arg_size: u64, period: duration) -> handle;
+extern task sched_attach(task_: handle, handler: task(&any));
+extern task sched_run();
 
 task sched_exit() {
-    TASK_EXITED = true;
 }
 
-task sched_run() 
-<current: i64, t: Task, t1: task(&any) -> &any, args: &any>
-{
-    loop {
-        current = SCHED.current;
-        if current == -1 {
-         return;
-        }
-        t = SCHED.tasks[current];
-        if t.running {
-             t1 = t.task_;
-             args = t.args;
-             t1(args);
-             if TASK_EXITED {
-              SCHED.tasks[current].running = false;
-              TASK_EXITED = false;
-             }
-        }
-        SCHED.current = current + 1;
-        if (SCHED.current == SCHED.num_tasks) {
-             SCHED.current = 0;
-        }
-        tbl_sleep(100);
-    }
-}
+// task sched_run() 
+// {
+// 	loop {}
+// }
