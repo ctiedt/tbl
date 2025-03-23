@@ -253,6 +253,7 @@ pub struct FunctionContext {
     pub span: Span,
     pub loop_labels: Vec<Block>,
     pub scope: Scope,
+    pub once_blocks: u8,
 }
 
 impl FunctionContext {
@@ -275,11 +276,21 @@ impl FunctionContext {
             span,
             loop_labels: vec![],
             scope: Scope::create_child(parent),
+            once_blocks: 0,
         }
     }
 
-    pub fn init_locals(&mut self, slot: StackSlot) {
-        self.locals.replace(Locals { slot, vars: vec![] });
+    pub fn add_once(&mut self) -> u8 {
+        self.once_blocks += 1;
+        self.once_blocks - 1
+    }
+
+    pub fn init_locals(&mut self, slot: StackSlot, locals_size: u32) {
+        self.locals.replace(Locals {
+            slot,
+            vars: vec![],
+            size: locals_size,
+        });
     }
 
     pub fn locals(&self) -> &Locals {
@@ -346,6 +357,7 @@ pub struct Local {
 pub struct Locals {
     pub slot: StackSlot,
     pub vars: Vec<Local>,
+    pub size: u32,
 }
 
 impl Locals {
@@ -423,6 +435,13 @@ impl Scope {
         match self.variables.get(key.as_ref()) {
             Some(value) => Some(value.clone()),
             None => self.parent.as_ref().map(|p| p.get(key.as_ref())).flatten(),
+        }
+    }
+
+    pub fn get_tcb(&self) -> Option<Ref<'_, Local>> {
+        match self.variables.get("__tcb") {
+            Some(Symbol::Local(tcb)) => Some(tcb.borrow()),
+            _ => None,
         }
     }
 

@@ -57,6 +57,10 @@ impl Type {
             Type::Handle => "handle".to_string(),
         }
     }
+
+    pub fn any_ptr() -> Self {
+        Type::Pointer(Box::new(Type::Any))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,6 +183,9 @@ pub enum StatementKind {
         handle: Expression,
         task: Expression,
     },
+    Once {
+        stmt: Box<Statement>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -254,6 +261,7 @@ impl Statement {
                 vars
             }
             StatementKind::Break => vec![],
+            StatementKind::Once { stmt } => stmt.referenced_vars(),
         }
     }
 }

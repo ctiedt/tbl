@@ -181,12 +181,15 @@ fn main() -> miette::Result<()> {
                     unreachable!()
                 }
                 tbl_parser::module::ModuleErrorKind::ParseError(ref err) => {
-                    ariadne::Report::build(ariadne::ReportKind::Error, &mod_name, err.span.start)
-                        .with_message(err.kind.to_string())
-                        .with_label(Label::new((&mod_name, err.span.clone())))
-                        .finish()
-                        .eprint((&mod_name, ariadne::Source::from(&src)))
-                        .into_diagnostic()?;
+                    ariadne::Report::build(
+                        ariadne::ReportKind::Error,
+                        (&mod_name, err.span.clone()),
+                    )
+                    .with_message(err.kind.to_string())
+                    .with_label(Label::new((&mod_name, err.span.clone())))
+                    .finish()
+                    .eprint((&mod_name, ariadne::Source::from(&src)))
+                    .into_diagnostic()?;
                 }
             }
         }
@@ -232,7 +235,7 @@ fn main() -> miette::Result<()> {
         }
         Err(err) => {
             let src = std::fs::read_to_string(&args.file).into_diagnostic()?;
-            ariadne::Report::build(ariadne::ReportKind::Error, &mod_name, err.span.start)
+            ariadne::Report::build(ariadne::ReportKind::Error, (&mod_name, err.span.clone()))
                 .with_message(err.kind.to_string())
                 .with_label(Label::new((&mod_name, err.span.clone())))
                 .finish()

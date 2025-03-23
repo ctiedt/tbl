@@ -152,11 +152,16 @@ impl DebugInfoGenerator {
                                 section_id.0,
                                 Relocation {
                                     offset: u64::from(reloc.offset),
-                                    size: reloc.size * 8,
-                                    kind: reloc.kind,
-                                    encoding: RelocationEncoding::Generic,
+                                    // size: reloc.size * 8,
+                                    // kind: reloc.kind,
+                                    // encoding: RelocationEncoding::Generic,
                                     symbol,
                                     addend: i64::try_from(symbol_offset).unwrap() + reloc.addend,
+                                    flags: cranelift_object::object::RelocationFlags::Generic {
+                                        kind: reloc.kind,
+                                        encoding: RelocationEncoding::Generic,
+                                        size: reloc.size * 8,
+                                    },
                                 },
                             )
                             .unwrap();

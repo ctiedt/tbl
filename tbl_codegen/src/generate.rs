@@ -2,6 +2,7 @@ use std::{collections::HashMap, fs::File, sync::Arc};
 
 use cranelift::{
     codegen::{
+        control::ControlPlane,
         ir::{immediates::Offset32, Function, UserFuncName},
         isa::TargetIsa,
         Context,
@@ -85,6 +86,10 @@ impl CodeGen {
         )
     }
 
+    fn pointer_type(&self) -> Type {
+        self.obj_module.isa().pointer_type()
+    }
+
     pub fn compile(mut self, module: &TblModule) -> CodegenResult<String> {
         info!("Building module {}", module.name);
         for dep in &module.dependencies {
@@ -155,8 +160,11 @@ impl CodeGen {
                 returns,
                 body,
             } => {
+                let mut params = params.clone();
+                params.push(("__tcb".to_string(), TblType::any_ptr()));
+
                 let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
-                for (_, ty) in params {
+                for (_, ty) in &params {
                     sig.params
                         .push(AbiParam::new(self.to_cranelift_type(ty).unwrap()))
                 }
@@ -199,24 +207,20 @@ impl CodeGen {
 
                 let locals_size = params.iter().map(|(_, p)| self.type_size(p)).sum::<u32>()
                     + self.task_stack_size(body);
-                // let locals_size = params.iter().map(|(_, p)| self.type_size(p)).sum::<u32>()
-                //     + locals.iter().map(|l| self.type_size(&l.1)).sum::<u32>();
-                let data = StackSlotData::new(StackSlotKind::ExplicitSlot, locals_size);
+                let data = StackSlotData::new(StackSlotKind::ExplicitSlot, locals_size, 0);
                 let locals_slot = func_builder.create_sized_stack_slot(data);
                 {
-                    // let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
                     let mut fn_ctx = self
                         .ctx
                         .get_function_mut(name)
                         .ok_or(CodegenError::unknown_task(decl.span.clone(), name))?;
-                    fn_ctx.init_locals(locals_slot);
+                    fn_ctx.init_locals(locals_slot, locals_size);
                 }
 
                 for (idx, (arg, type_)) in params.iter().enumerate() {
                     let params = func_builder.block_params(fn_entry);
                     let param = params[idx];
                     let ty_size = self.type_size(type_);
-                    // let fn_ctx = self.ctx.functions.get_mut(name).unwrap();
                     let mut fn_ctx = self
                         .ctx
                         .get_function_mut(name)
@@ -225,6 +229,63 @@ impl CodeGen {
                         .define_local(&mut func_builder, arg, type_.clone(), ty_size, param)
                         .map_err(|e| CodegenError::new(decl.span.clone(), e))?;
                 }
+
+                let tcb = {
+                    let fn_ctx = self.ctx.get_function(name).unwrap();
+                    let offset = fn_ctx.locals().offset_of("__tcb");
+                    func_builder.ins().stack_load(
+                        self.pointer_type(),
+                        fn_ctx.locals().slot,
+                        Offset32::new(offset as i32),
+                    )
+                };
+
+                let tcb_is_nonzero = func_builder.ins().icmp_imm(IntCC::NotEqual, tcb, 0);
+
+                let then_block = func_builder.create_block();
+                let check_block = func_builder.create_block();
+                let else_block = func_builder.create_block();
+
+                func_builder
+                    .ins()
+                    .brif(tcb_is_nonzero, check_block, &[], else_block, &[]);
+
+                func_builder.switch_to_block(check_block);
+
+                let should_copy_locals =
+                    func_builder
+                        .ins()
+                        .load(types::I8, MemFlags::new(), tcb, Offset32::new(0));
+                func_builder
+                    .ins()
+                    .brif(should_copy_locals, then_block, &[], else_block, &[]);
+
+                func_builder.switch_to_block(then_block);
+
+                let saved_local_member = func_builder.ins().iadd_imm(tcb, 16);
+                let saved_locals_addr = func_builder.ins().load(
+                    self.pointer_type(),
+                    MemFlags::new(),
+                    saved_local_member,
+                    Offset32::new(0),
+                );
+                let locals_addr = func_builder.ins().stack_addr(
+                    self.pointer_type(),
+                    locals_slot,
+                    Offset32::new(0),
+                );
+                let locals_size_val = func_builder
+                    .ins()
+                    .iconst(self.pointer_type(), locals_size as i64);
+                func_builder.call_memcpy(
+                    self.obj_module.target_config(),
+                    locals_addr,
+                    saved_locals_addr,
+                    locals_size_val,
+                );
+                func_builder.ins().jump(else_block, &[]);
+
+                func_builder.switch_to_block(else_block);
 
                 for stmt in body {
                     self.compile_stmt(&mut func_builder, stmt)?;
@@ -249,14 +310,14 @@ impl CodeGen {
                 ctx.compute_domtree();
                 ctx.verify(self.obj_module.isa())
                     .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
-                ctx.dce(self.obj_module.isa())
-                    .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
+                // ctx.dce(self.obj_module.isa())
+                //     .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
                 ctx.eliminate_unreachable_code(self.obj_module.isa())
                     .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
                 ctx.replace_redundant_loads()
                     .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
-                ctx.egraph_pass(self.obj_module.isa())
-                    .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
+                // ctx.egraph_pass(self.obj_module.isa())
+                //     .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
                 self.obj_module
                     .define_function(func_id, &mut ctx)
                     .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
@@ -309,14 +370,6 @@ impl CodeGen {
                         initializer: Some(value.clone()),
                     },
                 );
-                // self.ctx.globals.insert(
-                //     name.into(),
-                //     GlobalContext {
-                //         id: data_id,
-                //         type_: type_.clone(),
-                //         initializer: Some(value.clone()),
-                //     },
-                // );
             }
             DeclarationKind::ExternGlobal { name, type_ } => {
                 let data_id = self
@@ -332,14 +385,6 @@ impl CodeGen {
                         initializer: None,
                     },
                 );
-                // self.ctx.globals.insert(
-                //     name.into(),
-                //     GlobalContext {
-                //         id: data_id,
-                //         type_: type_.clone(),
-                //         initializer: None,
-                //     },
-                // );
             }
             DeclarationKind::Directive { .. } => {
                 unreachable!("Directives are handled by the preprocessor")
@@ -356,15 +401,20 @@ impl CodeGen {
         span: Span,
     ) -> CodegenResult<()> {
         let params_name = format!("__{name}_args");
+        let len = fn_ctx.params.len() - 1;
+        let params = fn_ctx.params.into_iter().take(len).collect::<Vec<_>>();
         self.ctx.create_struct_type(
             &params_name,
-            &fn_ctx.params,
+            &params,
             self.obj_module.isa().pointer_bytes() as usize,
         );
 
         let params_ty = self.ctx.types[&params_name].unwrap_struct().clone();
 
         let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
+        sig.params.push(AbiParam::new(
+            self.obj_module.target_config().pointer_type(),
+        ));
         sig.params.push(AbiParam::new(
             self.obj_module.target_config().pointer_type(),
         ));
@@ -379,10 +429,13 @@ impl CodeGen {
         self.insert_func(
             &func_name,
             func_id,
-            vec![(
-                String::from("args"),
-                TblType::Pointer(Box::new(TblType::Named(params_name))),
-            )],
+            vec![
+                (
+                    String::from("args"),
+                    TblType::Pointer(Box::new(TblType::Named(params_name))),
+                ),
+                (String::from("tcb"), TblType::any_ptr()),
+            ],
             None,
             false,
             false,
@@ -400,6 +453,7 @@ impl CodeGen {
         func_builder.seal_block(fn_entry);
 
         let param = func_builder.block_params(fn_entry)[0];
+        let tcb = func_builder.block_params(fn_entry)[1];
 
         let wrapped_func = self
             .obj_module
@@ -419,6 +473,7 @@ impl CodeGen {
             );
             args.push(arg);
         }
+        args.push(tcb);
         func_builder.ins().call(wrapped_func, &args);
         func_builder.ins().return_(&[]);
 
@@ -434,7 +489,7 @@ impl CodeGen {
         ctx.verify(self.obj_module.isa())
             .map_err(|e| CodegenError::new(span_clone, e.into()))?;
         let span_clone = span.clone();
-        ctx.dce(self.obj_module.isa())
+        ctx.eliminate_unreachable_code(self.obj_module.isa())
             .map_err(|e| CodegenError::new(span_clone, e.into()))?;
         let span_clone = span.clone();
         ctx.eliminate_unreachable_code(self.obj_module.isa())
@@ -443,7 +498,7 @@ impl CodeGen {
         ctx.replace_redundant_loads()
             .map_err(|e| CodegenError::new(span_clone, e.into()))?;
         let span_clone = span.clone();
-        ctx.egraph_pass(self.obj_module.isa())
+        ctx.egraph_pass(self.obj_module.isa(), &mut ControlPlane::default())
             .map_err(|e| CodegenError::new(span_clone, e.into()))?;
         let span_clone = span.clone();
         self.obj_module
@@ -456,8 +511,7 @@ impl CodeGen {
     fn build_start(&mut self) -> CodegenResult<()> {
         let mut sig = Signature::new(self.obj_module.isa().default_call_conv());
         sig.params.push(AbiParam::new(types::I32));
-        sig.params
-            .push(AbiParam::new(self.obj_module.isa().pointer_type()));
+        sig.params.push(AbiParam::new(self.pointer_type()));
         sig.returns.push(AbiParam::new(types::I32));
         let func_id = self
             .obj_module
@@ -486,7 +540,6 @@ impl CodeGen {
                     None
                 }
             })
-            // .map(|(_, g)| g)
             .collect::<Vec<_>>();
         for global in globals {
             let global = global.borrow();
@@ -494,14 +547,11 @@ impl CodeGen {
                 let data = self
                     .obj_module
                     .declare_data_in_func(global.id, func_builder.func);
-                let addr = func_builder
-                    .ins()
-                    .global_value(self.obj_module.isa().pointer_type(), data);
+                let addr = func_builder.ins().global_value(self.pointer_type(), data);
                 self.store_expr(&mut func_builder, &global.type_, addr, 0, init)?;
             }
         }
 
-        // let main_ctx = self.ctx.functions.get("__main").unwrap();
         let main_ctx = self.ctx.get_function("__main").unwrap();
         let main_ref = self
             .obj_module
@@ -518,9 +568,11 @@ impl CodeGen {
             .declare_func_in_func(sched_run_id, func_builder.func);
 
         let mut params = vec![];
-        if !main_ctx.params.is_empty() {
+        if main_ctx.params.len() > 1 {
             params.extend(func_builder.block_params(fn_entry));
         }
+        let zero = func_builder.ins().iconst(types::I64, 0);
+        params.push(zero);
 
         let main_inst = func_builder.ins().call(main_ref, &params);
         let main_ret = func_builder
@@ -532,7 +584,8 @@ impl CodeGen {
 
         func_builder.ins().return_(&[main_ret]);
 
-        //info!("{}", func.display());
+        info!("main");
+        info!("{}", func.display());
 
         let mut ctx = Context::for_function(func);
         self.obj_module
@@ -603,6 +656,62 @@ impl CodeGen {
                 self.compile_expr(func_builder, None, expr)?;
             }
             StatementKind::Return(v) => {
+                let tcb = {
+                    let fn_ctx = self.ctx.func_by_idx(fn_idx).unwrap();
+                    let offset = fn_ctx.locals().offset_of("__tcb");
+                    func_builder.ins().stack_load(
+                        self.pointer_type(),
+                        fn_ctx.locals().slot,
+                        Offset32::new(offset as i32),
+                    )
+                };
+
+                let should_copy_locals = func_builder.ins().icmp_imm(IntCC::NotEqual, tcb, 0);
+
+                let then_block = func_builder.create_block();
+                let else_block = func_builder.create_block();
+
+                func_builder
+                    .ins()
+                    .brif(should_copy_locals, then_block, &[], else_block, &[]);
+
+                func_builder.switch_to_block(then_block);
+
+                let one = func_builder.ins().iconst(types::I8, 1);
+                func_builder
+                    .ins()
+                    .store(MemFlags::new(), one, tcb, Offset32::new(0));
+                let saved_local_member = func_builder.ins().iadd_imm(tcb, 16);
+                let saved_locals_addr = func_builder.ins().load(
+                    self.pointer_type(),
+                    MemFlags::new(),
+                    saved_local_member,
+                    Offset32::new(0),
+                );
+                let locals_addr = {
+                    let fn_ctx = self.ctx.func_by_idx(fn_idx).unwrap();
+                    func_builder.ins().stack_addr(
+                        self.pointer_type(),
+                        fn_ctx.locals().slot,
+                        Offset32::new(0),
+                    )
+                };
+                let locals_size_val = {
+                    let fn_ctx = self.ctx.func_by_idx(fn_idx).unwrap();
+                    func_builder
+                        .ins()
+                        .iconst(self.pointer_type(), fn_ctx.locals().size as i64)
+                };
+                func_builder.call_memcpy(
+                    self.obj_module.target_config(),
+                    saved_locals_addr,
+                    locals_addr,
+                    locals_size_val,
+                );
+
+                func_builder.ins().jump(else_block, &[]);
+
+                func_builder.switch_to_block(else_block);
                 let returns = {
                     let ctx = self
                         .ctx
@@ -753,6 +862,58 @@ impl CodeGen {
                 func_builder
                     .ins()
                     .call(sched_attach, &[handle_val, task_val]);
+            }
+            StatementKind::Once { stmt } => {
+                let tcb = {
+                    let fn_ctx = self.ctx.func_by_idx(fn_idx).unwrap();
+                    let offset = fn_ctx.locals().offset_of("__tcb");
+                    func_builder.ins().stack_load(
+                        self.pointer_type(),
+                        fn_ctx.locals().slot,
+                        Offset32::new(offset as i32),
+                    )
+                };
+
+                let once_idx = self.ctx.func_by_idx_mut(fn_idx).unwrap().add_once();
+
+                let then_block = func_builder.create_block();
+                let check_block = func_builder.create_block();
+                let else_block = func_builder.create_block();
+
+                let tcb_is_null = func_builder.ins().icmp_imm(IntCC::Equal, tcb, 0);
+                func_builder
+                    .ins()
+                    .brif(tcb_is_null, else_block, &[], check_block, &[]);
+
+                func_builder.switch_to_block(check_block);
+                let enter_once =
+                    func_builder
+                        .ins()
+                        .load(types::I64, MemFlags::new(), tcb, Offset32::new(8));
+                let idx = 1i64 << once_idx;
+                let enter_once_set = func_builder.ins().band_imm(enter_once, idx);
+                let cond = func_builder.ins().icmp_imm(IntCC::Equal, enter_once_set, 0);
+                func_builder
+                    .ins()
+                    .brif(cond, then_block, &[], else_block, &[]);
+
+                func_builder.switch_to_block(then_block);
+
+                let enter_once =
+                    func_builder
+                        .ins()
+                        .load(types::I64, MemFlags::new(), tcb, Offset32::new(8));
+                let replace_enter_once = func_builder.ins().bor_imm(enter_once, idx);
+                func_builder.ins().store(
+                    MemFlags::new(),
+                    replace_enter_once,
+                    tcb,
+                    Offset32::new(8),
+                );
+                self.compile_stmt(func_builder, stmt)?;
+
+                func_builder.ins().jump(else_block, &[]);
+                func_builder.switch_to_block(else_block);
             }
         }
         Ok(())
@@ -924,9 +1085,7 @@ impl CodeGen {
                         let func_id = self
                             .obj_module
                             .declare_func_in_func(fun.func_id, builder.func);
-                        Ok(builder
-                            .ins()
-                            .func_addr(self.obj_module.isa().pointer_type(), func_id))
+                        Ok(builder.ins().func_addr(self.pointer_type(), func_id))
                     }
                     Symbol::Global(global) => {
                         let global = global.borrow();
@@ -934,9 +1093,7 @@ impl CodeGen {
                             .obj_module
                             .declare_data_in_func(global.id, builder.func);
 
-                        let addr = builder
-                            .ins()
-                            .global_value(self.obj_module.isa().pointer_type(), data);
+                        let addr = builder.ins().global_value(self.pointer_type(), data);
 
                         Ok(builder.ins().load(
                             self.to_cranelift_type(&global.type_).unwrap(),
@@ -947,104 +1104,63 @@ impl CodeGen {
                     }
                 }
             }
-            ExpressionKind::Call { task, args } => {
-                // let ctx = self.ctx.func_by_idx(fn_idx).unwrap();
-                match &task.kind {
-                    ExpressionKind::Var(task_name) => {
-                        let sym = {
-                            let ctx = self.ctx.func_by_idx(fn_idx).unwrap();
-                            ctx.scope
-                                .get(task_name)
-                                .ok_or(CodegenError::unknown_task(expr.span.clone(), task_name))?
-                        };
-                        match sym {
-                            Symbol::Function(func_ctx) => {
-                                let func_ctx = func_ctx.borrow();
-                                let func = self
-                                    .obj_module
-                                    .declare_func_in_func(func_ctx.func_id, builder.func);
+            ExpressionKind::Call { task, args } => match &task.kind {
+                ExpressionKind::Var(task_name) => {
+                    let sym = {
+                        let ctx = self.ctx.func_by_idx(fn_idx).unwrap();
+                        ctx.scope
+                            .get(task_name)
+                            .ok_or(CodegenError::unknown_task(expr.span.clone(), task_name))?
+                    };
+                    match sym {
+                        Symbol::Function(func_ctx) => {
+                            let func_ctx = func_ctx.borrow();
+                            let func = self
+                                .obj_module
+                                .declare_func_in_func(func_ctx.func_id, builder.func);
 
-                                if func_ctx.is_variadic {
-                                    let mut arg_vals = vec![];
-                                    for arg in args {
-                                        let ty_hint = {
-                                            let ctx = &self.ctx.func_by_idx(fn_idx).ok_or(
-                                                CodegenError::unknown_task_id(
-                                                    expr.span.clone(),
-                                                    fn_idx,
-                                                ),
-                                            )?;
-                                            self.type_of(ctx, arg)
-                                        };
-                                        let v = self.compile_expr(builder, ty_hint, arg)?;
-                                        arg_vals.push(v);
-                                    }
-                                    let call = builder.ins().call(func, &arg_vals);
-
-                                    let sig_ref = builder.func.dfg.call_signature(call).unwrap();
-                                    let abi_params = arg_vals
-                                        .into_iter()
-                                        .map(|a| {
-                                            let ty = builder.func.dfg.value_type(a);
-                                            AbiParam::new(ty)
-                                        })
-                                        .collect::<Vec<AbiParam>>();
-
-                                    builder.func.dfg.signatures[sig_ref].params = abi_params;
-
-                                    let res = builder.inst_results(call);
-                                    if res.is_empty() {
-                                        Ok(builder.ins().iconst(types::I8, 0))
-                                    } else {
-                                        Ok(res[0])
-                                    }
-                                } else {
-                                    let mut arg_vals = vec![];
-                                    let param_types = func_ctx.params.clone();
-                                    for (arg, (_, ty)) in args.iter().zip(param_types) {
-                                        let v = self.compile_expr(builder, Some(ty), arg)?;
-                                        arg_vals.push(v);
-                                    }
-                                    let call = builder.ins().call(func, &arg_vals);
-                                    let res = builder.inst_results(call);
-                                    if res.is_empty() {
-                                        Ok(builder.ins().iconst(types::I8, 0))
-                                    } else {
-                                        Ok(res[0])
-                                    }
-                                }
-                            }
-                            func_var => {
-                                let TblType::TaskPtr { params, returns } = &func_var.type_() else {
-                                    unreachable!()
-                                };
-                                let callee = {
-                                    let ctx = self.ctx.func_by_idx(fn_idx).ok_or(
-                                        CodegenError::unknown_task_id(expr.span.clone(), fn_idx),
-                                    )?;
-                                    let offset = ctx.locals().offset_of(task_name);
-                                    builder.ins().stack_load(
-                                        self.obj_module.isa().pointer_type(),
-                                        ctx.locals().slot,
-                                        Offset32::new(offset as i32),
-                                    )
-                                };
+                            if func_ctx.is_variadic {
                                 let mut arg_vals = vec![];
-                                let mut sig = self.obj_module.make_signature();
-                                if let Some(returns) = returns.clone() {
-                                    sig.returns.push(AbiParam::new(
-                                        self.to_cranelift_type(&returns).unwrap(),
-                                    ));
-                                }
-                                for (arg, ty) in args.iter().zip(params.clone()) {
-                                    let v = self.compile_expr(builder, Some(ty.clone()), arg)?;
+                                for arg in args {
+                                    let ty_hint = {
+                                        let ctx = &self.ctx.func_by_idx(fn_idx).ok_or(
+                                            CodegenError::unknown_task_id(
+                                                expr.span.clone(),
+                                                fn_idx,
+                                            ),
+                                        )?;
+                                        self.type_of(ctx, arg)
+                                    };
+                                    let v = self.compile_expr(builder, ty_hint, arg)?;
                                     arg_vals.push(v);
-                                    sig.params
-                                        .push(AbiParam::new(self.to_cranelift_type(&ty).unwrap()));
                                 }
+                                let call = builder.ins().call(func, &arg_vals);
 
-                                let sig_ref = builder.import_signature(sig);
-                                let call = builder.ins().call_indirect(sig_ref, callee, &arg_vals);
+                                let sig_ref = builder.func.dfg.call_signature(call).unwrap();
+                                let abi_params = arg_vals
+                                    .into_iter()
+                                    .map(|a| {
+                                        let ty = builder.func.dfg.value_type(a);
+                                        AbiParam::new(ty)
+                                    })
+                                    .collect::<Vec<AbiParam>>();
+
+                                builder.func.dfg.signatures[sig_ref].params = abi_params;
+
+                                let res = builder.inst_results(call);
+                                if res.is_empty() {
+                                    Ok(builder.ins().iconst(types::I8, 0))
+                                } else {
+                                    Ok(res[0])
+                                }
+                            } else {
+                                let mut arg_vals = vec![];
+                                let param_types = func_ctx.params.clone();
+                                for (arg, (_, ty)) in args.iter().zip(param_types) {
+                                    let v = self.compile_expr(builder, Some(ty), arg)?;
+                                    arg_vals.push(v);
+                                }
+                                let call = builder.ins().call(func, &arg_vals);
                                 let res = builder.inst_results(call);
                                 if res.is_empty() {
                                     Ok(builder.ins().iconst(types::I8, 0))
@@ -1053,43 +1169,78 @@ impl CodeGen {
                                 }
                             }
                         }
-                    }
-                    expr_kind => {
-                        let mut sig = self.obj_module.make_signature();
-                        {
-                            let ctx = &self
-                                .ctx
-                                .func_by_idx(fn_idx)
-                                .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
-                            for arg in args {
-                                sig.params.push(AbiParam::new(
-                                    self.to_cranelift_type(&self.type_of(ctx, arg).unwrap())
-                                        .unwrap(),
-                                ));
+                        func_var => {
+                            let TblType::TaskPtr { params, returns } = &func_var.type_() else {
+                                unreachable!()
+                            };
+                            let callee = {
+                                let ctx = self.ctx.func_by_idx(fn_idx).ok_or(
+                                    CodegenError::unknown_task_id(expr.span.clone(), fn_idx),
+                                )?;
+                                let offset = ctx.locals().offset_of(task_name);
+                                builder.ins().stack_load(
+                                    self.pointer_type(),
+                                    ctx.locals().slot,
+                                    Offset32::new(offset as i32),
+                                )
+                            };
+                            let mut arg_vals = vec![];
+                            let mut sig = self.obj_module.make_signature();
+                            if let Some(returns) = returns.clone() {
+                                sig.returns
+                                    .push(AbiParam::new(self.to_cranelift_type(&returns).unwrap()));
                             }
-                        }
+                            for (arg, ty) in args.iter().zip(params.clone()) {
+                                let v = self.compile_expr(builder, Some(ty.clone()), arg)?;
+                                arg_vals.push(v);
+                                sig.params
+                                    .push(AbiParam::new(self.to_cranelift_type(&ty).unwrap()));
+                            }
 
-                        let callee = self.compile_lvalue(
-                            builder,
-                            &expr_kind.clone().with_span(task.span.clone()),
-                        )?;
-                        let mut arg_vals = vec![];
-                        for arg in args {
-                            let arg_val = self.compile_expr(builder, None, arg)?;
-                            arg_vals.push(arg_val);
-                        }
-
-                        let sig_ref = builder.import_signature(sig);
-                        let call = builder.ins().call_indirect(sig_ref, callee, &arg_vals);
-                        let res = builder.inst_results(call);
-                        if res.is_empty() {
-                            Ok(builder.ins().iconst(types::I8, 0))
-                        } else {
-                            Ok(res[0])
+                            let sig_ref = builder.import_signature(sig);
+                            let call = builder.ins().call_indirect(sig_ref, callee, &arg_vals);
+                            let res = builder.inst_results(call);
+                            if res.is_empty() {
+                                Ok(builder.ins().iconst(types::I8, 0))
+                            } else {
+                                Ok(res[0])
+                            }
                         }
                     }
                 }
-            }
+                expr_kind => {
+                    let mut sig = self.obj_module.make_signature();
+                    {
+                        let ctx = &self
+                            .ctx
+                            .func_by_idx(fn_idx)
+                            .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
+                        for arg in args {
+                            sig.params.push(AbiParam::new(
+                                self.to_cranelift_type(&self.type_of(ctx, arg).unwrap())
+                                    .unwrap(),
+                            ));
+                        }
+                    }
+
+                    let callee = self
+                        .compile_lvalue(builder, &expr_kind.clone().with_span(task.span.clone()))?;
+                    let mut arg_vals = vec![];
+                    for arg in args {
+                        let arg_val = self.compile_expr(builder, None, arg)?;
+                        arg_vals.push(arg_val);
+                    }
+
+                    let sig_ref = builder.import_signature(sig);
+                    let call = builder.ins().call_indirect(sig_ref, callee, &arg_vals);
+                    let res = builder.inst_results(call);
+                    if res.is_empty() {
+                        Ok(builder.ins().iconst(types::I8, 0))
+                    } else {
+                        Ok(res[0])
+                    }
+                }
+            },
             ExpressionKind::BinaryOperation {
                 left,
                 right,
@@ -1113,7 +1264,7 @@ impl CodeGen {
                             right,
                         )?;
                         let scale = builder.ins().iconst(
-                            self.obj_module.isa().pointer_type(),
+                            self.pointer_type(),
                             self.obj_module.isa().pointer_bytes() as i64,
                         );
                         let addend = builder.ins().imul(right, scale);
@@ -1127,7 +1278,7 @@ impl CodeGen {
                         )?;
                         let right = self.compile_expr(builder, Some(TblType::Pointer(p)), right)?;
                         let scale = builder.ins().iconst(
-                            self.obj_module.isa().pointer_type(),
+                            self.pointer_type(),
                             self.obj_module.isa().pointer_bytes() as i64,
                         );
                         let addend = builder.ins().imul(left, scale);
@@ -1138,7 +1289,7 @@ impl CodeGen {
                             self.compile_expr(builder, Some(TblType::Pointer(p.clone())), left)?;
                         let right = self.compile_expr(builder, Some(TblType::Pointer(p)), right)?;
                         let scale = builder.ins().iconst(
-                            self.obj_module.isa().pointer_type(),
+                            self.pointer_type(),
                             self.obj_module.isa().pointer_bytes() as i64,
                         );
                         let addend = builder.ins().imul(right, scale);
@@ -1149,7 +1300,7 @@ impl CodeGen {
                             self.compile_expr(builder, Some(TblType::Pointer(p.clone())), left)?;
                         let right = self.compile_expr(builder, Some(TblType::Pointer(p)), right)?;
                         let scale = builder.ins().iconst(
-                            self.obj_module.isa().pointer_type(),
+                            self.pointer_type(),
                             self.obj_module.isa().pointer_bytes() as i64,
                         );
                         let addend = builder.ins().imul(left, scale);
@@ -1270,9 +1421,7 @@ impl CodeGen {
                         let data = self
                             .obj_module
                             .declare_data_in_func(global.id, builder.func);
-                        let addr = builder
-                            .ins()
-                            .global_value(self.obj_module.isa().pointer_type(), data);
+                        let addr = builder.ins().global_value(self.pointer_type(), data);
                         Ok(builder.ins().load(
                             member_ty,
                             MemFlags::new(),
@@ -1331,6 +1480,9 @@ impl CodeGen {
                     (TblType::Integer { signed: false, .. }, TblType::Pointer(p)) => {
                         self.compile_expr(builder, Some(TblType::Pointer(p)), value)
                     }
+                    (TblType::Pointer(p1), TblType::Pointer(p2)) => {
+                        self.compile_expr(builder, Some(*p2), value)
+                    }
                     (t1, t2) => Err(CodegenError::illegal_cast(expr.span.clone(), t1, t2)),
                 }
             }
@@ -1364,10 +1516,9 @@ impl CodeGen {
                     Offset32::new(0),
                 ))
             }
-            ExpressionKind::SizeOf { value } => Ok(builder.ins().iconst(
-                self.obj_module.isa().pointer_type(),
-                self.type_size(value) as i64,
-            )),
+            ExpressionKind::SizeOf { value } => Ok(builder
+                .ins()
+                .iconst(self.pointer_type(), self.type_size(value) as i64)),
             ExpressionKind::Schedule { task, args, period } => {
                 let ty_name = format!("__{task}_args");
                 let arg_ty = self
@@ -1382,13 +1533,11 @@ impl CodeGen {
 
                 let period_val = self.compile_expr(builder, Some(TblType::Duration), period)?;
 
-                let data = StackSlotData::new(StackSlotKind::ExplicitSlot, ty_size);
+                let data = StackSlotData::new(StackSlotKind::ExplicitSlot, ty_size, 0);
                 let slot = builder.create_sized_stack_slot(data);
-                let addr = builder.ins().stack_addr(
-                    self.obj_module.isa().pointer_type(),
-                    slot,
-                    Offset32::new(0),
-                );
+                let addr = builder
+                    .ins()
+                    .stack_addr(self.pointer_type(), slot, Offset32::new(0));
 
                 for (
                     arg,
@@ -1403,7 +1552,6 @@ impl CodeGen {
                 }
 
                 let task_name = format!("__{task}_wrapper");
-                // let called_task_ctx = self.ctx.functions.get(&task_name).unwrap();
                 let called_task_ctx = self
                     .ctx
                     .get_function(&task_name)
@@ -1411,15 +1559,10 @@ impl CodeGen {
                 let called_task = self
                     .obj_module
                     .declare_func_in_func(called_task_ctx.func_id, builder.func);
-                let called_task_addr = builder
-                    .ins()
-                    .func_addr(self.obj_module.isa().pointer_type(), called_task);
+                let called_task_addr = builder.ins().func_addr(self.pointer_type(), called_task);
 
-                let args_size = builder
-                    .ins()
-                    .iconst(self.obj_module.isa().pointer_type(), ty_size as i64);
+                let args_size = builder.ins().iconst(self.pointer_type(), ty_size as i64);
 
-                // let sched_enqeue_ctx = self.ctx.functions.get("sched_enqueue").unwrap();
                 let sched_enqueue_ctx = self.ctx.get_function("sched_enqueue").unwrap();
                 let sched_enqueue = self
                     .obj_module
@@ -1465,7 +1608,7 @@ impl CodeGen {
                             (ctx.locals().offset_of(&var.name), ctx.locals().slot)
                         };
                         Ok(builder.ins().stack_addr(
-                            self.obj_module.isa().pointer_type(),
+                            self.pointer_type(),
                             slot,
                             Offset32::new(offset as i32),
                         ))
@@ -1476,9 +1619,7 @@ impl CodeGen {
                         let value = self
                             .obj_module
                             .declare_data_in_func(global.id, builder.func);
-                        Ok(builder
-                            .ins()
-                            .global_value(self.obj_module.isa().pointer_type(), value))
+                        Ok(builder.ins().global_value(self.pointer_type(), value))
                     }
                 }
             }

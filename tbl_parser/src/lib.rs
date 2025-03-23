@@ -739,6 +739,14 @@ impl<'a> Parser<'a> {
                 StatementKind::Attach { handle, task }.with_span(start..end),
             ));
         }
+        if self.accept(Token::Once)?.is_some() {
+            let stmt = Box::new(
+                self.parse_stmt()?
+                    .ok_or(self.error(ParseErrorKind::ExpectedExpression))?,
+            );
+            let end = self.current_span().end;
+            return Ok(Some(StatementKind::Once { stmt }.with_span(start..end)));
+        }
         if let Some(expr) = self.parse_expr()? {
             if self.accept(Token::Semicolon)?.is_some() {
                 let end = self.current_span().end;

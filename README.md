@@ -1,38 +1,47 @@
 # Task Based Language
 
-What if all your functions were cyclical tasks? The *Task Based Language* (TBL) is an attempt
-to create a programming language that captures the essentials of many realtime applications
-by putting thís idea into the foreground.
+What if all your functions were cyclical tasks? The _Task Based Language_ (TBL)
+is an attempt to create a programming language that captures the essentials of
+many realtime applications by putting thís idea into the foreground.
 
-TBL is still work in progress. While an example scheduler exists, many features are still
-missing or only partially implemented. Use at your own risk!
+TBL is still work in progress. While an example scheduler exists, many features
+are still missing or only partially implemented. Use at your own risk and report
+compiler bugs if you find any!
 
 ## Example
 
 ```
-extern task printf(...);    // (1)
+use std;
 
-global n: u32 = 0;          // (2)
-
-task count(counter: &u32) { // (3)
-    *counter = counter + 1;
-    printf("%d\n", *counter);
-    return;
+task print(v: u32) {
+	printf("%d\n", v);
 }
 
-task main() -> u32 {
-    schedule count(&n);      // (4)
-    return 0;
+task count(from: u32) -> u32 {
+	uninit n: u32;
+	once {
+		n = from;
+	}
+	n = n + 1;
+	return n;
+}
+
+task main() {
+	let t: handle = schedule count(41) every 100ms;
+	on t do print;
 }
 ```
 
-This example doesn't run yet, but this is the "Hello World" I'm working towards.
-Comment (1) shows how easily you can integrate functions with a C ABI, e.g. a regular
-libc function. For our example, we'll use a global value (see comment (2)) as our
-task state. Comment (3) shows how you declare a task. TBL doesn't differentiate
-between tasks and functions: even external functions can be used as tasks! Finally,
-comment (4) shows how you can schedule a task. The default scheduler will be started
-at the end of your main function, but you can also replace it with your own implementation.
+The example above implements a simple counter. Let's start with the main task:
+As you see, we dont't just call `count`, we `schedule` it. This means `count`
+will be executed every 100ms. Jumping to the definition of `count`, you may
+notice the `uninit` syntax and `once` block. These are necessary because
+scheduled tasks save the state of their local variables every time they run.
+Putting the initialization of `n` into a `once` block ensures that it is only
+initialized once and the counter will count up as intended. Returning to the
+main task, you can see that it is also possible to attach tasks to other tasks:
+Every time `count` runs, `print` will be called with its return value and
+thereby print the current value of `n`.
 
-If you want to look at some examples that do run, check out the [examples](examples)
-folder. You can also read the [documentation](docs).
+If you want to look at some examples that do run, check out the
+[examples](examples) folder. You can also read the [documentation](docs).

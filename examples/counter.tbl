@@ -1,0 +1,19 @@
+use std;
+
+task print(v: u32) {
+	printf("%d\n", v);
+}
+
+task count(from: u32) -> u32 {
+	uninit n: u32;
+	once {
+		n = from;
+	}
+	n = n + 1;
+	return n;
+}
+
+task main() {
+	let t: handle = schedule count(42) every 100ms;
+	on t do print;
+}

@@ -1,4 +1,4 @@
 /target
 *.o
 */node_modules
-[^\.]*
+#[^\.]*
