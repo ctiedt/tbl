@@ -45,6 +45,8 @@ pub enum ParseErrorKind {
     ExpectedPattern(String),
     #[error("expected expression")]
     ExpectedExpression,
+    #[error("expected statement")]
+    ExpectedStmt,
     #[error("bad integer value")]
     ParseIntError(#[from] ParseIntError),
     #[error("expected identifier")]

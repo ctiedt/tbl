@@ -16,10 +16,9 @@ enum Point {
 }
 
 task main() -> u32
-<n: Number, p: Point, t: Tuple>
 {
-	p = :TwoD {x: 0, y: 0};
-	n = :One;
+	let p: Point = :TwoD {x: 0, y: 0};
+	let n: Number = :One;
 	printf("%d\n", n);
 	printf("%d\n", #Number);
 	printf("%d\n", #Point);
@@ -40,14 +39,14 @@ task main() -> u32
 		}
 	}
 
-	match p {
-		TwoD { x, y } -> {
-			printf("(%d, %d)\n", x, y);
-		}
-		ThreeD { x, y, z } -> {
-			printf("(%d, %d, %d)\n", x, y, z);
-		}
-	}
+	// match p {
+	// 	TwoD { x, y } -> {
+	// 		printf("(%d, %d)\n", x, y);
+	// 	}
+	// 	ThreeD { x, y, z } -> {
+	// 		printf("(%d, %d, %d)\n", x, y, z);
+	// 	}
+	// }
 
 	printf("After match\n");
 	return 0;

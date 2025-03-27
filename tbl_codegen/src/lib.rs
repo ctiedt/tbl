@@ -2,6 +2,7 @@ mod context;
 mod debug_info;
 pub mod error;
 mod generate;
+mod tcb;
 
 #[derive(Clone)]
 pub struct Config {

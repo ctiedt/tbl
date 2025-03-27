@@ -3,11 +3,4 @@ extern task printf(...);
 extern task sched_enqueue(task_: task(&any) -> &any, args: &any, arg_size: u64, period: duration) -> handle;
 extern task sched_attach(task_: handle, handler: task(&any));
 extern task sched_run();
-
-task sched_exit() {
-}
-
-// task sched_run() 
-// {
-// 	loop {}
-// }
+extern task sched_exit(task_: handle);

@@ -149,8 +149,8 @@ pub struct Statement {
 pub enum StatementKind {
     Conditional {
         test: Expression,
-        then: Vec<Statement>,
-        else_: Vec<Statement>,
+        then: Box<Statement>,
+        else_: Box<Statement>,
     },
     Exit,
     Expression(Expression),
@@ -169,7 +169,7 @@ pub enum StatementKind {
         type_: Type,
     },
     Loop {
-        body: Vec<Statement>,
+        body: Box<Statement>,
     },
     Block {
         statements: Vec<Statement>,
@@ -206,12 +206,8 @@ impl Statement {
         match &self.kind {
             StatementKind::Conditional { test, then, else_ } => {
                 let mut vars = test.referenced_vars();
-                for stmt in then {
-                    vars.extend(stmt.referenced_vars());
-                }
-                for stmt in else_ {
-                    vars.extend(stmt.referenced_vars());
-                }
+                vars.extend(then.referenced_vars());
+                vars.extend(else_.referenced_vars());
                 vars
             }
             StatementKind::Exit => vec![],
@@ -234,13 +230,7 @@ impl Statement {
                 value,
             } => value.referenced_vars(),
             StatementKind::Declaration { .. } => vec![],
-            StatementKind::Loop { body } => {
-                let mut vars = vec![];
-                for stmt in body {
-                    vars.extend(stmt.referenced_vars());
-                }
-                vars
-            }
+            StatementKind::Loop { body } => body.referenced_vars(),
             StatementKind::Block { statements } => {
                 let mut vars = vec![];
                 for stmt in statements {
@@ -262,6 +252,30 @@ impl Statement {
             }
             StatementKind::Break => vec![],
             StatementKind::Once { stmt } => stmt.referenced_vars(),
+        }
+    }
+
+    pub fn ends_with_jump(&self) -> bool {
+        match &self.kind {
+            StatementKind::Conditional { .. } => false,
+            StatementKind::Exit => true,
+            StatementKind::Expression(_expression) => false,
+            StatementKind::Return(_expression) => true,
+            StatementKind::Assign { .. } => false,
+            StatementKind::Definition { .. } => false,
+            StatementKind::Declaration { .. } => false,
+            StatementKind::Loop { body } => body.ends_with_jump(),
+            StatementKind::Block { statements } => {
+                if let Some(stmt) = statements.last() {
+                    stmt.ends_with_jump()
+                } else {
+                    false
+                }
+            }
+            StatementKind::Match { .. } => false,
+            StatementKind::Break => true,
+            StatementKind::Attach { .. } => false,
+            StatementKind::Once { stmt } => stmt.ends_with_jump(),
         }
     }
 }

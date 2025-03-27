@@ -1,4 +1,4 @@
-@using("lib/std.tbl");
+use std;
 
 global n: u32 = 0;
 
@@ -19,7 +19,7 @@ task bar(n: &u32) {
 
 task main() -> i32
 {
-    schedule foo(&n);
-    schedule bar(&n);
+    schedule foo(&n) every 500ms;
+    schedule bar(&n) every 500ms;
     return 0;
 }

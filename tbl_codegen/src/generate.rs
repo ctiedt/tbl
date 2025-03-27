@@ -26,6 +26,9 @@ use tbl_parser::{
 use crate::{
     context::{StructMember, TypeContext},
     error::{CodegenError, CodegenResult},
+    tcb::{
+        load_copy_locals, load_id, load_locals, load_once_mask, store_copy_locals, store_once_mask,
+    },
 };
 
 use super::{
@@ -252,23 +255,14 @@ impl CodeGen {
 
                 func_builder.switch_to_block(check_block);
 
-                let should_copy_locals =
-                    func_builder
-                        .ins()
-                        .load(types::I8, MemFlags::new(), tcb, Offset32::new(0));
+                let should_copy_locals = load_copy_locals(&mut func_builder, tcb);
                 func_builder
                     .ins()
                     .brif(should_copy_locals, then_block, &[], else_block, &[]);
 
                 func_builder.switch_to_block(then_block);
 
-                let saved_local_member = func_builder.ins().iadd_imm(tcb, 16);
-                let saved_locals_addr = func_builder.ins().load(
-                    self.pointer_type(),
-                    MemFlags::new(),
-                    saved_local_member,
-                    Offset32::new(0),
-                );
+                let saved_locals_addr = load_locals(&mut func_builder, tcb);
                 let locals_addr = func_builder.ins().stack_addr(
                     self.pointer_type(),
                     locals_slot,
@@ -310,8 +304,6 @@ impl CodeGen {
                 ctx.compute_domtree();
                 ctx.verify(self.obj_module.isa())
                     .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
-                // ctx.dce(self.obj_module.isa())
-                //     .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
                 ctx.eliminate_unreachable_code(self.obj_module.isa())
                     .map_err(|e| CodegenError::new(decl.span.clone(), e.into()))?;
                 ctx.replace_redundant_loads()
@@ -607,50 +599,80 @@ impl CodeGen {
                 let after_block = func_builder.create_block();
 
                 let test_val = self.compile_expr(func_builder, Some(TblType::Bool), test)?;
-                if else_.is_empty() {
-                    func_builder
-                        .ins()
-                        .brif(test_val, then_block, &[], after_block, &[]);
-                } else {
-                    func_builder
-                        .ins()
-                        .brif(test_val, then_block, &[], else_block, &[]);
-                }
+                // if else_.is_empty() {
+                //     func_builder
+                //         .ins()
+                //         .brif(test_val, then_block, &[], after_block, &[]);
+                // } else {
+                //     func_builder
+                //         .ins()
+                //         .brif(test_val, then_block, &[], else_block, &[]);
+                // }
+                func_builder
+                    .ins()
+                    .brif(test_val, then_block, &[], else_block, &[]);
 
                 func_builder.seal_block(then_block);
                 func_builder.seal_block(else_block);
                 func_builder.switch_to_block(then_block);
-                for stmt in then {
-                    self.compile_stmt(func_builder, stmt)?;
+                // for stmt in then {
+                //     self.compile_stmt(func_builder, stmt)?;
+                // }
+                self.compile_stmt(func_builder, then)?;
+                if !then.ends_with_jump() {
+                    func_builder.ins().jump(after_block, &[]);
                 }
-                if let Some(last) = then.last() {
-                    if !matches!(last.kind, StatementKind::Return(_) | StatementKind::Break) {
-                        func_builder.ins().jump(after_block, &[]);
-                    }
-                }
+                // if let Some(last) = then.last() {
+                //     if !matches!(last.kind, StatementKind::Return(_) | StatementKind::Break) {
+                //         func_builder.ins().jump(after_block, &[]);
+                //     }
+                // }
                 func_builder.switch_to_block(else_block);
-                for stmt in else_ {
-                    self.compile_stmt(func_builder, stmt)?;
+                if !else_.ends_with_jump() {
+                    func_builder.ins().jump(after_block, &[]);
                 }
-                if let Some(last) = else_.last() {
-                    if !matches!(last.kind, StatementKind::Return(_) | StatementKind::Break) {
-                        func_builder.ins().jump(after_block, &[]);
-                    }
-                }
+                // for stmt in else_ {
+                //     self.compile_stmt(func_builder, stmt)?;
+                // }
+                self.compile_stmt(func_builder, else_)?;
+                // if let Some(last) = else_.last() {
+                //     if !matches!(last.kind, StatementKind::Return(_) | StatementKind::Break) {
+                //         func_builder.ins().jump(after_block, &[]);
+                //     }
+                // }
 
                 func_builder.seal_block(after_block);
                 func_builder.switch_to_block(after_block);
             }
             StatementKind::Exit => {
-                self.compile_expr(
-                    func_builder,
-                    None,
-                    &ExpressionKind::Call {
-                        task: Box::new(ExpressionKind::Var("sched_exit".into()).with_span(0..0)),
-                        args: vec![],
-                    }
-                    .with_span(0..0),
-                )?;
+                let tcb = {
+                    let fn_ctx = self.ctx.func_by_idx(fn_idx).unwrap();
+                    let offset = fn_ctx.locals().offset_of("__tcb");
+                    func_builder.ins().stack_load(
+                        self.pointer_type(),
+                        fn_ctx.locals().slot,
+                        Offset32::new(offset as i32),
+                    )
+                };
+
+                let task_id = load_id(func_builder, tcb);
+
+                let sched_exit_ctx = self.ctx.get_function("sched_exit").unwrap();
+                let sched_exit = self
+                    .obj_module
+                    .declare_func_in_func(sched_exit_ctx.func_id, func_builder.func);
+
+                func_builder.ins().call(sched_exit, &[task_id]);
+
+                // self.compile_expr(
+                //     func_builder,
+                //     None,
+                //     &ExpressionKind::Call {
+                //         task: Box::new(ExpressionKind::Var("sched_exit".into()).with_span(0..0)),
+                //         args: vec![task_id],
+                //     }
+                //     .with_span(0..0),
+                // )?;
             }
             StatementKind::Expression(expr) => {
                 self.compile_expr(func_builder, None, expr)?;
@@ -678,16 +700,8 @@ impl CodeGen {
                 func_builder.switch_to_block(then_block);
 
                 let one = func_builder.ins().iconst(types::I8, 1);
-                func_builder
-                    .ins()
-                    .store(MemFlags::new(), one, tcb, Offset32::new(0));
-                let saved_local_member = func_builder.ins().iadd_imm(tcb, 16);
-                let saved_locals_addr = func_builder.ins().load(
-                    self.pointer_type(),
-                    MemFlags::new(),
-                    saved_local_member,
-                    Offset32::new(0),
-                );
+                store_copy_locals(func_builder, tcb, one);
+                let saved_locals_addr = load_locals(func_builder, tcb);
                 let locals_addr = {
                     let fn_ctx = self.ctx.func_by_idx(fn_idx).unwrap();
                     func_builder.ins().stack_addr(
@@ -737,14 +751,19 @@ impl CodeGen {
                 self.store_expr(func_builder, &type_, loc, 0, value)?;
             }
             StatementKind::Definition { name, type_, value } => {
-                let val = self.compile_expr(func_builder, Some(type_.clone()), value)?;
                 let size = self.type_size(type_);
-                let mut ctx = self
-                    .ctx
-                    .func_by_idx_mut(fn_idx)
-                    .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
-                ctx.define_local(func_builder, name, type_.clone(), size, val)
-                    .unwrap();
+                {
+                    let mut ctx = self
+                        .ctx
+                        .func_by_idx_mut(fn_idx)
+                        .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
+                    ctx.declare_local(name, type_.clone(), size).unwrap();
+                };
+                let loc = self.compile_lvalue(
+                    func_builder,
+                    &ExpressionKind::Var(name.clone()).with_span(stmt.span.clone()),
+                )?;
+                self.store_expr(func_builder, type_, loc, 0, value)?;
             }
             StatementKind::Declaration { name, type_ } => {
                 let size = self.type_size(type_);
@@ -766,9 +785,7 @@ impl CodeGen {
                         .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
                     ctx.loop_labels.push(next);
                 }
-                for stmt in body {
-                    self.compile_stmt(func_builder, stmt)?;
-                }
+                self.compile_stmt(func_builder, body)?;
                 {
                     let mut ctx = self
                         .ctx
@@ -886,10 +903,7 @@ impl CodeGen {
                     .brif(tcb_is_null, else_block, &[], check_block, &[]);
 
                 func_builder.switch_to_block(check_block);
-                let enter_once =
-                    func_builder
-                        .ins()
-                        .load(types::I64, MemFlags::new(), tcb, Offset32::new(8));
+                let enter_once = load_once_mask(func_builder, tcb);
                 let idx = 1i64 << once_idx;
                 let enter_once_set = func_builder.ins().band_imm(enter_once, idx);
                 let cond = func_builder.ins().icmp_imm(IntCC::Equal, enter_once_set, 0);
@@ -899,17 +913,9 @@ impl CodeGen {
 
                 func_builder.switch_to_block(then_block);
 
-                let enter_once =
-                    func_builder
-                        .ins()
-                        .load(types::I64, MemFlags::new(), tcb, Offset32::new(8));
+                let enter_once = load_once_mask(func_builder, tcb);
                 let replace_enter_once = func_builder.ins().bor_imm(enter_once, idx);
-                func_builder.ins().store(
-                    MemFlags::new(),
-                    replace_enter_once,
-                    tcb,
-                    Offset32::new(8),
-                );
+                store_once_mask(func_builder, tcb, replace_enter_once);
                 self.compile_stmt(func_builder, stmt)?;
 
                 func_builder.ins().jump(else_block, &[]);
