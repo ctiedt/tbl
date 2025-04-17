@@ -1,0 +1,19 @@
+use std;
+
+struct Point {
+	x: u32,
+	y: u32
+}
+
+task Point_new(x: u32, y: u32) -> Point {
+	printf("%p\n", __ret);
+	let p: Point = {x: x, y: y};
+	printf("x = %d, y = %d\n", p.x, p.y);
+	return p;
+}
+
+task main() {
+	let p: Point = Point_new(1, 2);
+	printf("%p\n", p);
+	printf("x = %d, y = %d\n", p.x, p.y);
+}

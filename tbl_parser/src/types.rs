@@ -61,6 +61,20 @@ impl Type {
     pub fn any_ptr() -> Self {
         Type::Pointer(Box::new(Type::Any))
     }
+
+    pub fn is_composite(&self) -> bool {
+        match self {
+            Type::Any => false,
+            Type::Bool => false,
+            Type::Duration => false,
+            Type::Integer { signed, width } => false,
+            Type::Array { item, length } => true,
+            Type::Pointer(_) => false,
+            Type::Named(_) => true,
+            Type::TaskPtr { params, returns } => false,
+            Type::Handle => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

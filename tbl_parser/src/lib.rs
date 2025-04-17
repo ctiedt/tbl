@@ -628,24 +628,12 @@ impl<'a> Parser<'a> {
             let test = self
                 .parse_expr()?
                 .ok_or(self.error(ParseErrorKind::ExpectedExpression))?;
-            // self.require(Token::CurlyOpen)?;
-            // let mut then = vec![];
-            // let mut else_ = vec![];
             let then = self
                 .parse_stmt()?
                 .ok_or(self.error(ParseErrorKind::ExpectedStmt))?;
-            // while let Some(stmt) = self.parse_stmt()? {
-            //     then.push(stmt);
-            // }
-            // self.require(Token::CurlyClose)?;
             let else_ = if self.accept(Token::Else)?.is_some() {
-                // self.require(Token::CurlyOpen)?;
-                // while let Some(stmt) = self.parse_stmt()? {
-                //     else_.push(stmt);
-                // }
                 self.parse_stmt()?
                     .ok_or(self.error(ParseErrorKind::ExpectedStmt))?
-                // self.require(Token::CurlyClose)?;
             } else {
                 StatementKind::Block { statements: vec![] }.with_span(self.current_span())
             };
@@ -661,10 +649,6 @@ impl<'a> Parser<'a> {
         }
         if self.accept(Token::Loop)?.is_some() {
             self.require(Token::CurlyOpen)?;
-            // let mut body = vec![];
-            // while let Some(stmt) = self.parse_stmt()? {
-            //     body.push(stmt);
-            // }
             let body = self
                 .parse_stmt()?
                 .ok_or(self.error(ParseErrorKind::ExpectedStmt))?;

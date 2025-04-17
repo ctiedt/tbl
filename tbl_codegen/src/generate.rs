@@ -172,8 +172,15 @@ impl CodeGen {
                         .push(AbiParam::new(self.to_cranelift_type(ty).unwrap()))
                 }
                 if let Some(ret) = returns {
-                    sig.returns
-                        .push(AbiParam::new(self.to_cranelift_type(ret).unwrap()));
+                    if ret.is_composite() {
+                        sig.params
+                            .push(AbiParam::new(self.to_cranelift_type(ret).unwrap()));
+                        // params.push(("__ret".to_string(), TblType::Pointer(Box::new(ret.clone()))));
+                        params.push(("__ret".to_string(), ret.clone()));
+                    } else {
+                        sig.returns
+                            .push(AbiParam::new(self.to_cranelift_type(ret).unwrap()));
+                    }
                 }
 
                 //info!("{name}({:?}) -> {returns:?}", params);
@@ -229,7 +236,7 @@ impl CodeGen {
                         .get_function_mut(name)
                         .ok_or(CodegenError::unknown_task(decl.span.clone(), name))?;
                     fn_ctx
-                        .define_local(&mut func_builder, arg, type_.clone(), ty_size, param)
+                        .define_local(&mut func_builder, arg, type_.clone(), true, ty_size, param)
                         .map_err(|e| CodegenError::new(decl.span.clone(), e))?;
                 }
 
@@ -599,15 +606,6 @@ impl CodeGen {
                 let after_block = func_builder.create_block();
 
                 let test_val = self.compile_expr(func_builder, Some(TblType::Bool), test)?;
-                // if else_.is_empty() {
-                //     func_builder
-                //         .ins()
-                //         .brif(test_val, then_block, &[], after_block, &[]);
-                // } else {
-                //     func_builder
-                //         .ins()
-                //         .brif(test_val, then_block, &[], else_block, &[]);
-                // }
                 func_builder
                     .ins()
                     .brif(test_val, then_block, &[], else_block, &[]);
@@ -615,31 +613,15 @@ impl CodeGen {
                 func_builder.seal_block(then_block);
                 func_builder.seal_block(else_block);
                 func_builder.switch_to_block(then_block);
-                // for stmt in then {
-                //     self.compile_stmt(func_builder, stmt)?;
-                // }
                 self.compile_stmt(func_builder, then)?;
                 if !then.ends_with_jump() {
                     func_builder.ins().jump(after_block, &[]);
                 }
-                // if let Some(last) = then.last() {
-                //     if !matches!(last.kind, StatementKind::Return(_) | StatementKind::Break) {
-                //         func_builder.ins().jump(after_block, &[]);
-                //     }
-                // }
                 func_builder.switch_to_block(else_block);
                 if !else_.ends_with_jump() {
                     func_builder.ins().jump(after_block, &[]);
                 }
-                // for stmt in else_ {
-                //     self.compile_stmt(func_builder, stmt)?;
-                // }
                 self.compile_stmt(func_builder, else_)?;
-                // if let Some(last) = else_.last() {
-                //     if !matches!(last.kind, StatementKind::Return(_) | StatementKind::Break) {
-                //         func_builder.ins().jump(after_block, &[]);
-                //     }
-                // }
 
                 func_builder.seal_block(after_block);
                 func_builder.switch_to_block(after_block);
@@ -663,16 +645,6 @@ impl CodeGen {
                     .declare_func_in_func(sched_exit_ctx.func_id, func_builder.func);
 
                 func_builder.ins().call(sched_exit, &[task_id]);
-
-                // self.compile_expr(
-                //     func_builder,
-                //     None,
-                //     &ExpressionKind::Call {
-                //         task: Box::new(ExpressionKind::Var("sched_exit".into()).with_span(0..0)),
-                //         args: vec![task_id],
-                //     }
-                //     .with_span(0..0),
-                // )?;
             }
             StatementKind::Expression(expr) => {
                 self.compile_expr(func_builder, None, expr)?;
@@ -733,11 +705,20 @@ impl CodeGen {
                         .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
                     ctx.returns.clone()
                 };
-                let mut return_values = vec![];
-                if let Some(expr) = v {
-                    return_values.push(self.compile_expr(func_builder, returns, expr)?);
+                if returns.as_ref().map(|r| r.is_composite()).unwrap_or(false) {
+                    let loc = self.compile_lvalue(
+                        func_builder,
+                        &ExpressionKind::Var("__ret".to_string()).with_span(0..0),
+                    )?;
+                    self.store_expr(func_builder, &returns.unwrap(), loc, 0, v.as_ref().unwrap())?;
+                    func_builder.ins().return_(&[]);
+                } else {
+                    let mut return_values = vec![];
+                    if let Some(expr) = v {
+                        return_values.push(self.compile_expr(func_builder, returns, expr)?);
+                    }
+                    func_builder.ins().return_(&return_values);
                 }
-                func_builder.ins().return_(&return_values);
             }
             StatementKind::Assign { location, value } => {
                 let type_ = {
@@ -757,13 +738,26 @@ impl CodeGen {
                         .ctx
                         .func_by_idx_mut(fn_idx)
                         .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
-                    ctx.declare_local(name, type_.clone(), size).unwrap();
+                    ctx.declare_local(name, type_.clone(), false, size).unwrap();
                 };
-                let loc = self.compile_lvalue(
-                    func_builder,
-                    &ExpressionKind::Var(name.clone()).with_span(stmt.span.clone()),
-                )?;
-                self.store_expr(func_builder, type_, loc, 0, value)?;
+                if matches!(value.kind, ExpressionKind::Call { .. }) && type_.is_composite() {
+                    let ExpressionKind::Call { task, mut args } = value.kind.clone() else {
+                        unreachable!()
+                    };
+                    args.push(ExpressionKind::Literal(Literal::Int(0)).with_span(0..0));
+                    args.push(ExpressionKind::Var(name.to_string()).with_span(0..0));
+                    self.compile_expr(
+                        func_builder,
+                        None,
+                        &ExpressionKind::Call { task, args }.with_span(value.span.clone()),
+                    )?;
+                } else {
+                    let loc = self.compile_lvalue(
+                        func_builder,
+                        &ExpressionKind::Var(name.clone()).with_span(stmt.span.clone()),
+                    )?;
+                    self.store_expr(func_builder, type_, loc, 0, value)?;
+                }
             }
             StatementKind::Declaration { name, type_ } => {
                 let size = self.type_size(type_);
@@ -771,7 +765,7 @@ impl CodeGen {
                     .ctx
                     .func_by_idx_mut(fn_idx)
                     .ok_or(CodegenError::unknown_task_id(stmt.span.clone(), fn_idx))?;
-                ctx.declare_local(name, type_.clone(), size).unwrap();
+                ctx.declare_local(name, type_.clone(), false, size).unwrap();
             }
             StatementKind::Loop { body } => {
                 let block = func_builder.create_block();
@@ -1080,11 +1074,31 @@ impl CodeGen {
                     Symbol::Local(var) => {
                         let var = var.borrow();
                         let offset = ctx.locals().offset_of(&var.name);
-                        Ok(builder.ins().stack_load(
-                            self.to_cranelift_type(&var.type_).unwrap(),
-                            ctx.locals().slot,
-                            Offset32::new(offset as i32),
-                        ))
+                        if type_hint
+                            .as_ref()
+                            .map(|t| t.is_composite())
+                            .unwrap_or(false)
+                        {
+                            if var.foreign {
+                                Ok(builder.ins().stack_load(
+                                    self.to_cranelift_type(&var.type_).unwrap(),
+                                    ctx.locals().slot,
+                                    Offset32::new(offset as i32),
+                                ))
+                            } else {
+                                Ok(builder.ins().stack_addr(
+                                    self.pointer_type(),
+                                    ctx.locals().slot,
+                                    Offset32::new(offset as i32),
+                                ))
+                            }
+                        } else {
+                            Ok(builder.ins().stack_load(
+                                self.to_cranelift_type(&var.type_).unwrap(),
+                                ctx.locals().slot,
+                                Offset32::new(offset as i32),
+                            ))
+                        }
                     }
                     Symbol::Function(fun) => {
                         let fun = fun.borrow();
@@ -1214,7 +1228,7 @@ impl CodeGen {
                         }
                     }
                 }
-                expr_kind => {
+                _ => {
                     let mut sig = self.obj_module.make_signature();
                     {
                         let ctx = &self
@@ -1229,8 +1243,7 @@ impl CodeGen {
                         }
                     }
 
-                    let callee = self
-                        .compile_lvalue(builder, &expr_kind.clone().with_span(task.span.clone()))?;
+                    let callee = self.compile_lvalue(builder, &expr)?;
                     let mut arg_vals = vec![];
                     for arg in args {
                         let arg_val = self.compile_expr(builder, None, arg)?;
@@ -1613,13 +1626,26 @@ impl CodeGen {
                                 .ok_or(CodegenError::unknown_task_id(expr.span.clone(), fn_idx))?;
                             (ctx.locals().offset_of(&var.name), ctx.locals().slot)
                         };
-                        Ok(builder.ins().stack_addr(
-                            self.pointer_type(),
-                            slot,
-                            Offset32::new(offset as i32),
+                        if var.foreign {
+                            Ok(builder.ins().stack_load(
+                                self.to_cranelift_type(&var.type_).unwrap(),
+                                slot,
+                                Offset32::new(offset as i32),
+                            ))
+                        } else {
+                            Ok(builder.ins().stack_addr(
+                                self.pointer_type(),
+                                slot,
+                                Offset32::new(offset as i32),
+                            ))
+                        }
+                    }
+                    Symbol::Function(_) => {
+                        return Err(CodegenError::illegal_lvalue(
+                            expr.span.clone(),
+                            expr.kind.clone(),
                         ))
                     }
-                    Symbol::Function(_) => todo!(),
                     Symbol::Global(global) => {
                         let global = global.borrow();
                         let value = self
@@ -1808,7 +1834,7 @@ impl CodeGen {
             TblType::Array { .. } => Some(self.obj_module.target_config().pointer_type()),
             TblType::Pointer(_) => Some(self.obj_module.target_config().pointer_type()),
             TblType::Named(name) => match &self.ctx.types[name] {
-                TypeContext::Struct(_) => None,
+                TypeContext::Struct(_) => Some(self.pointer_type()),
                 TypeContext::Enum(_) => Some(types::I8),
             },
             TblType::TaskPtr { .. } => Some(self.obj_module.target_config().pointer_type()),

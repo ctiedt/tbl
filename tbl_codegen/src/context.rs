@@ -301,6 +301,7 @@ impl FunctionContext {
         &mut self,
         name: &str,
         type_: TblType,
+        foreign: bool,
         size: u32,
     ) -> Result<(), CodegenErrorKind> {
         match self.locals.as_mut() {
@@ -308,6 +309,7 @@ impl FunctionContext {
                 let local = Local {
                     name: name.to_string(),
                     type_,
+                    foreign,
                     size,
                 };
                 self.scope.insert_local(name, local.clone());
@@ -323,6 +325,7 @@ impl FunctionContext {
         builder: &mut FunctionBuilder,
         name: &str,
         type_: TblType,
+        foreign: bool,
         size: u32,
         value: Value,
     ) -> Result<(), CodegenErrorKind> {
@@ -335,6 +338,7 @@ impl FunctionContext {
                 let local = Local {
                     name: name.to_string(),
                     type_,
+                    foreign,
                     size,
                 };
                 self.scope.insert_local(name, local.clone());
@@ -350,6 +354,7 @@ impl FunctionContext {
 pub struct Local {
     pub name: String,
     pub type_: TblType,
+    pub foreign: bool,
     pub size: u32,
 }
 
