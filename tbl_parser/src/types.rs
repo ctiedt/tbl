@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use crate::Span;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,7 +21,7 @@ pub enum Type {
         length: u64,
     },
     Pointer(Box<Type>),
-    Named(String),
+    Path(Path),
     TaskPtr {
         params: Vec<Type>,
         returns: Option<Box<Type>>,
@@ -38,7 +40,7 @@ impl Type {
             }
             Type::Array { item, length } => format!("[{}; {length}]", item.name()),
             Type::Pointer(t) => format!("&{}", t.name()),
-            Type::Named(n) => n.to_string(),
+            Type::Path(p) => p.to_string(),
             Type::TaskPtr { params, returns } => {
                 format!(
                     "task({}){}",
@@ -58,6 +60,14 @@ impl Type {
         }
     }
 
+    pub fn path(&self) -> Option<&Path> {
+        if let Type::Path(p) = self {
+            Some(p)
+        } else {
+            None
+        }
+    }
+
     pub fn any_ptr() -> Self {
         Type::Pointer(Box::new(Type::Any))
     }
@@ -70,11 +80,17 @@ impl Type {
             Type::Integer { signed, width } => false,
             Type::Array { item, length } => true,
             Type::Pointer(_) => false,
-            Type::Named(_) => true,
+            Type::Path(_) => true,
             Type::TaskPtr { params, returns } => false,
             Type::Handle => false,
         }
     }
+}
+
+pub enum ParamKind {
+    Named(String, Type),
+    Variadic,
+    SelfRef,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,6 +112,71 @@ impl ExternTaskParams {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Path {
+    segments: Vec<String>,
+}
+
+impl Path {
+    pub fn prefixed<P: Into<Path>>(&self, prefix: P) -> Path {
+        let mut segments = prefix.into().segments;
+        segments.extend_from_slice(&self.segments);
+        Path { segments }
+    }
+
+    pub fn extend<P: Into<Path>>(&mut self, suffix: P) {
+        self.segments.extend(suffix.into().segments);
+    }
+
+    pub fn truncate(&mut self, n: usize) {
+        self.segments.truncate(self.segments.len() - n);
+    }
+
+    pub fn len(&self) -> usize {
+        self.segments.len()
+    }
+
+    pub fn item(&self) -> Option<&str> {
+        self.segments.last().map(|x| x.as_str())
+    }
+
+    pub fn replace_item<S: ToString>(&mut self, item: S) {
+        *self.segments.last_mut().unwrap() = item.to_string();
+    }
+
+    pub fn from_segments(segments: Vec<String>) -> Path {
+        Path { segments }
+    }
+
+    pub fn from_ident(ident: &str) -> Path {
+        Path {
+            segments: vec![ident.to_string()],
+        }
+    }
+}
+
+impl From<String> for Path {
+    fn from(value: String) -> Self {
+        Path {
+            segments: vec![value],
+        }
+    }
+}
+
+impl From<&str> for Path {
+    fn from(value: &str) -> Self {
+        Path {
+            segments: vec![value.to_string()],
+        }
+    }
+}
+
+impl Display for Path {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.segments.join("::"))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Declaration {
     pub span: Span,
@@ -105,26 +186,26 @@ pub struct Declaration {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeclarationKind {
     ExternTask {
-        name: String,
+        path: Path,
         params: ExternTaskParams,
         returns: Option<Type>,
     },
     Task {
-        name: String,
+        path: Path,
         params: Vec<(String, Type)>,
         returns: Option<Type>,
         body: Vec<Statement>,
     },
     Struct {
-        name: String,
+        path: Path,
         members: Vec<(String, Type)>,
     },
     Enum {
-        name: String,
+        path: Path,
         variants: Vec<(String, Vec<(String, Type)>)>,
     },
     Global {
-        name: String,
+        path: Path,
         type_: Type,
         value: Expression,
     },
@@ -136,7 +217,7 @@ pub enum DeclarationKind {
         module: String,
     },
     ExternGlobal {
-        name: String,
+        path: Path,
         type_: Type,
     },
 }
@@ -216,7 +297,7 @@ impl StatementKind {
 }
 
 impl Statement {
-    pub fn referenced_vars(&self) -> Vec<(&str, Span)> {
+    pub fn referenced_vars(&self) -> Vec<(&Path, Span)> {
         match &self.kind {
             StatementKind::Conditional { test, then, else_ } => {
                 let mut vars = test.referenced_vars();
@@ -303,8 +384,13 @@ pub struct Expression {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpressionKind {
     Literal(Literal),
-    Var(String),
+    Path(Path),
     Call {
+        task: Box<Expression>,
+        args: Vec<Expression>,
+    },
+    MethodCall {
+        var: Box<Expression>,
         task: Box<Expression>,
         args: Vec<Expression>,
     },
@@ -346,12 +432,20 @@ impl ExpressionKind {
 }
 
 impl Expression {
-    pub fn referenced_vars(&self) -> Vec<(&str, Span)> {
+    pub fn referenced_vars(&self) -> Vec<(&Path, Span)> {
         match &self.kind {
             ExpressionKind::Literal(_) => vec![],
-            ExpressionKind::Var(v) => vec![(v, self.span.clone())],
+            ExpressionKind::Path(p) => vec![(p, self.span.clone())],
             ExpressionKind::Call { task, args } => {
                 let mut vars = task.referenced_vars();
+                for arg in args {
+                    vars.extend(arg.referenced_vars());
+                }
+                vars
+            }
+            ExpressionKind::MethodCall { var, task, args } => {
+                let mut vars = task.referenced_vars();
+                vars.extend(var.referenced_vars());
                 for arg in args {
                     vars.extend(arg.referenced_vars());
                 }

@@ -6,7 +6,7 @@ use std::{
 use crate::{
     error::ParseError,
     parse_path,
-    types::{Declaration, DeclarationKind, ExternTaskParams, Program},
+    types::{self, Declaration, DeclarationKind, ExternTaskParams, Program},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -47,6 +47,14 @@ pub struct TblModule {
 }
 
 impl TblModule {
+    pub fn lsp_new(program: Program) -> Self {
+        TblModule {
+            name: String::new(),
+            program,
+            dependencies: vec![],
+        }
+    }
+
     pub fn dependency_exports(&self) -> Vec<Declaration> {
         let mut exports = vec![];
         for dep in &self.dependencies {
@@ -62,54 +70,54 @@ impl TblModule {
             let span = decl.span.clone();
             match kind {
                 DeclarationKind::ExternTask {
-                    name,
+                    path,
                     params,
                     returns,
                 } => exports.push(
                     DeclarationKind::ExternTask {
-                        name: name.clone(),
+                        path: path.clone(),
                         params: params.clone(),
                         returns: returns.clone(),
                     }
                     .with_span(span),
                 ),
                 DeclarationKind::Task {
-                    name,
+                    path,
                     params,
                     returns,
                     ..
                 } => exports.push(
                     DeclarationKind::ExternTask {
-                        name: name.clone(),
+                        path: path.prefixed(self.name.clone()),
                         params: ExternTaskParams::WellKnown(params.clone()),
                         returns: returns.clone(),
                     }
                     .with_span(span),
                 ),
-                DeclarationKind::Struct { name, members } => exports.push(
+                DeclarationKind::Struct { path, members } => exports.push(
                     DeclarationKind::Struct {
-                        name: name.clone(),
+                        path: path.prefixed(self.name.clone()),
                         members: members.clone(),
                     }
                     .with_span(span),
                 ),
-                DeclarationKind::Enum { name, variants } => exports.push(
+                DeclarationKind::Enum { path, variants } => exports.push(
                     DeclarationKind::Enum {
-                        name: name.clone(),
+                        path: path.prefixed(self.name.clone()),
                         variants: variants.clone(),
                     }
                     .with_span(span),
                 ),
-                DeclarationKind::Global { name, type_, .. } => exports.push(
+                DeclarationKind::Global { path, type_, .. } => exports.push(
                     DeclarationKind::ExternGlobal {
-                        name: name.clone(),
+                        path: path.prefixed(self.name.clone()),
                         type_: type_.clone(),
                     }
                     .with_span(span),
                 ),
-                DeclarationKind::ExternGlobal { name, type_ } => exports.push(
+                DeclarationKind::ExternGlobal { path, type_ } => exports.push(
                     DeclarationKind::ExternGlobal {
-                        name: name.clone(),
+                        path: path.prefixed(self.name.clone()),
                         type_: type_.clone(),
                     }
                     .with_span(span),
@@ -121,31 +129,37 @@ impl TblModule {
     }
 }
 
-pub fn parse_module_hierarchy<P: AsRef<Path>>(
+pub fn parse_module_hierarchy<P: AsRef<Path>, Q: Into<types::Path> + Clone>(
     main_file: P,
     search_paths: &[&str],
+    prefix: Q,
 ) -> Result<(TblModule, Vec<ModuleError>), ModuleError> {
-    let name = main_file
+    let raw_name = main_file
         .as_ref()
         .file_stem()
         .ok_or(ModuleError::path_does_not_exist(
             main_file.as_ref().to_owned(),
         ))?;
+    let name = raw_name.to_string_lossy().to_string();
     let mut errors = vec![];
-    let (program, errs) = parse_path(&main_file);
+    let (program, errs) = parse_path(&main_file, prefix.clone());
     errors.extend(errs.iter().map(|e| ModuleError {
         mod_path: main_file.as_ref().to_path_buf(),
         kind: ModuleErrorKind::ParseError(e.clone()),
     }));
     // errors.append(&mut errs);
+    let name_path = types::Path::from_ident(&name);
     let mut dependencies = vec![];
     for decl in &program.declarations {
         if let DeclarationKind::Use { module } = &decl.kind {
             let paths = search_paths.iter().map(|p| format!("{p}/{module}.tbl"));
             for p in paths {
                 if std::fs::File::open(&p).is_ok() {
-                    let (submodule, mut submodule_errors) =
-                        parse_module_hierarchy(&p, search_paths)?;
+                    let (submodule, mut submodule_errors) = parse_module_hierarchy(
+                        &p,
+                        search_paths,
+                        name_path.prefixed(prefix.clone()),
+                    )?;
                     dependencies.push(submodule);
                     errors.append(&mut submodule_errors);
                     break;
@@ -155,7 +169,7 @@ pub fn parse_module_hierarchy<P: AsRef<Path>>(
     }
     Ok((
         TblModule {
-            name: name.to_string_lossy().to_string(),
+            name,
             program,
             dependencies,
         },

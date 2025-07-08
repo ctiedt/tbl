@@ -12,7 +12,7 @@ use cranelift::{
 use cranelift_module::FuncId;
 
 use tbl_parser::{
-    types::{Expression, Type as TblType},
+    types::{Expression, Path, Type as TblType},
     Span,
 };
 
@@ -20,13 +20,13 @@ use crate::error::{CodegenError, CodegenErrorKind, CodegenResult};
 
 #[derive(Default)]
 pub struct CodeGenContext {
-    pub types: HashMap<String, TypeContext>,
+    pub types: HashMap<Path, TypeContext>,
     pub global_scope: Scope,
 }
 
 impl CodeGenContext {
-    pub fn insert_function(&mut self, name: String, function: FunctionContext) {
-        self.global_scope.insert_function(name, function);
+    pub fn insert_function(&mut self, path: Path, function: FunctionContext) {
+        self.global_scope.insert_function(path, function);
     }
 
     pub fn func_by_idx(&self, idx: u32) -> Option<Ref<'_, FunctionContext>> {
@@ -49,16 +49,20 @@ impl CodeGenContext {
         })
     }
 
-    pub fn get_function(&self, name: &str) -> Option<Ref<'_, FunctionContext>> {
-        self.global_scope
-            .functions()
-            .find_map(|(n, f)| if n == name { Some(f) } else { None })
+    pub fn functions(&self) -> impl Iterator<Item = (&Path, Ref<'_, FunctionContext>)> {
+        self.global_scope.functions()
     }
 
-    pub fn get_function_mut(&mut self, name: &str) -> Option<RefMut<'_, FunctionContext>> {
+    pub fn get_function(&self, path: &Path) -> Option<Ref<'_, FunctionContext>> {
+        self.global_scope
+            .functions()
+            .find_map(|(n, f)| if n == path { Some(f) } else { None })
+    }
+
+    pub fn get_function_mut(&mut self, path: &Path) -> Option<RefMut<'_, FunctionContext>> {
         self.global_scope
             .functions_mut()
-            .find_map(|(n, f)| if n == name { Some(f) } else { None })
+            .find_map(|(n, f)| if n == path { Some(f) } else { None })
     }
 
     pub fn type_size(&self, ty: &TblType, ptr_size: usize) -> usize {
@@ -68,7 +72,7 @@ impl CodeGenContext {
             TblType::Integer { width, .. } => (width / 8) as usize,
             TblType::Array { item, length } => self.type_size(item, ptr_size) * (*length as usize),
             TblType::Pointer(_) => ptr_size,
-            TblType::Named(name) => match &self.types[name] {
+            TblType::Path(p) => match &self.types[p] {
                 TypeContext::Struct(struct_ty) => struct_ty
                     .members
                     .iter()
@@ -97,12 +101,12 @@ impl CodeGenContext {
 
     pub fn create_struct_type(
         &mut self,
-        ty_name: &str,
+        ty_name: Path,
         members: &[(String, TblType)],
         ptr_size: usize,
     ) {
         self.types.insert(
-            ty_name.to_string(),
+            ty_name,
             TypeContext::Struct(self.create_anonymous_struct_type(members, ptr_size)),
         );
     }
@@ -153,7 +157,7 @@ impl CodeGenContext {
 
     pub fn create_enum_type(
         &mut self,
-        ty_name: &str,
+        ty_name: Path,
         variants: &[(String, Vec<(String, TblType)>)],
         ptr_size: usize,
     ) {
@@ -163,14 +167,12 @@ impl CodeGenContext {
             layout.push((name.clone(), variant));
         }
 
-        self.types.insert(
-            ty_name.to_string(),
-            TypeContext::Enum(EnumContext { variants: layout }),
-        );
+        self.types
+            .insert(ty_name, TypeContext::Enum(EnumContext { variants: layout }));
     }
 
-    pub fn get_enum_type(&self, name: &str) -> Option<&EnumContext> {
-        match self.types.get(name)? {
+    pub fn get_enum_type(&self, path: &Path) -> Option<&EnumContext> {
+        match self.types.get(path)? {
             TypeContext::Struct(_) => None,
             TypeContext::Enum(t) => Some(t),
         }
@@ -307,7 +309,7 @@ impl FunctionContext {
         match self.locals.as_mut() {
             Some(locals) => {
                 let local = Local {
-                    name: name.to_string(),
+                    name: name.into(),
                     type_,
                     foreign,
                     size,
@@ -336,7 +338,7 @@ impl FunctionContext {
                     .ins()
                     .stack_store(value, locals.slot, Offset32::new(idx as i32));
                 let local = Local {
-                    name: name.to_string(),
+                    name: name.into(),
                     type_,
                     foreign,
                     size,
@@ -352,7 +354,7 @@ impl FunctionContext {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Local {
-    pub name: String,
+    pub name: Path,
     pub type_: TblType,
     pub foreign: bool,
     pub size: u32,
@@ -370,10 +372,10 @@ impl Locals {
         self.vars.iter().map(|l| l.size).sum()
     }
 
-    pub fn offset_of(&self, name: &str) -> u32 {
+    pub fn offset_of(&self, path: &Path) -> u32 {
         self.vars
             .iter()
-            .take_while(|l| l.name != name)
+            .take_while(|l| &l.name != path)
             .map(|l| l.size)
             .sum()
     }
@@ -418,7 +420,7 @@ impl EnumContext {
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct Scope {
     parent: Option<Box<Scope>>,
-    variables: HashMap<String, Symbol>,
+    variables: HashMap<Path, Symbol>,
 }
 
 impl Scope {
@@ -436,29 +438,29 @@ impl Scope {
         }
     }
 
-    pub fn get<S: AsRef<str>>(&self, key: S) -> Option<Symbol> {
-        match self.variables.get(key.as_ref()) {
+    pub fn get(&self, key: &Path) -> Option<Symbol> {
+        match self.variables.get(key) {
             Some(value) => Some(value.clone()),
-            None => self.parent.as_ref().map(|p| p.get(key.as_ref())).flatten(),
+            None => self.parent.as_ref().map(|p| p.get(key)).flatten(),
         }
     }
 
     pub fn get_tcb(&self) -> Option<Ref<'_, Local>> {
-        match self.variables.get("__tcb") {
+        match self.variables.get(&"__tcb".into()) {
             Some(Symbol::Local(tcb)) => Some(tcb.borrow()),
             _ => None,
         }
     }
 
-    pub fn symbols(&self) -> HashMap<String, Symbol> {
+    pub fn symbols(&self) -> HashMap<Path, Symbol> {
         let mut symbols = HashMap::new();
         match &self.parent {
             Some(p) => {
-                for (name, sym) in p.symbols() {
-                    symbols.insert(name, sym);
+                for (path, sym) in p.symbols() {
+                    symbols.insert(path, sym);
                 }
-                for (name, sym) in self.variables.iter() {
-                    symbols.insert(name.clone(), sym.clone());
+                for (path, sym) in self.variables.iter() {
+                    symbols.insert(path.clone(), sym.clone());
                 }
             }
             None => {
@@ -468,32 +470,32 @@ impl Scope {
         symbols
     }
 
-    pub fn insert_global(&mut self, key: impl Into<String>, value: GlobalContext) {
+    pub fn insert_global(&mut self, key: impl Into<Path>, value: GlobalContext) {
         self.variables
             .insert(key.into(), Symbol::Global(Rc::new(RefCell::new(value))));
     }
 
-    pub fn insert_local(&mut self, key: impl Into<String>, value: Local) {
+    pub fn insert_local(&mut self, key: impl Into<Path>, value: Local) {
         let key = key.into();
         self.variables
             .insert(key.into(), Symbol::Local(Rc::new(RefCell::new(value))));
     }
 
-    pub fn insert_function(&mut self, key: impl Into<String>, value: FunctionContext) {
+    pub fn insert_function(&mut self, key: impl Into<Path>, value: FunctionContext) {
         self.variables
             .insert(key.into(), Symbol::Function(Rc::new(RefCell::new(value))));
     }
 
-    pub fn functions(&self) -> impl Iterator<Item = (&str, Ref<'_, FunctionContext>)> {
+    pub fn functions(&self) -> impl Iterator<Item = (&Path, Ref<'_, FunctionContext>)> {
         self.variables.iter().filter_map(|(n, v)| match v {
-            Symbol::Function(f) => Some((n.as_str(), f.borrow())),
+            Symbol::Function(f) => Some((n, f.borrow())),
             _ => None,
         })
     }
 
-    pub fn functions_mut(&mut self) -> impl Iterator<Item = (&str, RefMut<'_, FunctionContext>)> {
+    pub fn functions_mut(&mut self) -> impl Iterator<Item = (&Path, RefMut<'_, FunctionContext>)> {
         self.variables.iter_mut().filter_map(|(n, v)| match v {
-            Symbol::Function(f) => Some((n.as_str(), f.borrow_mut())),
+            Symbol::Function(f) => Some((n, f.borrow_mut())),
             _ => None,
         })
     }

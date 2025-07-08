@@ -1,5 +1,5 @@
 use logos::Logos;
-use tbl_parser::{Parser, Source, Span, Token};
+use tbl_parser::{types::Path, Parser, Span, Token};
 
 fn main() {
     let mut args = std::env::args();
@@ -18,7 +18,7 @@ fn main() {
 
     dbg!(&tokens);
 
-    let mut parser = Parser::new(tokens.unwrap());
+    let mut parser = Parser::new(tokens.unwrap(), Path::default());
     let (program, errors) = parser.parse();
 
     for e in errors {

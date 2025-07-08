@@ -148,10 +148,12 @@ fn compile_module(
     for dep in &module.dependencies {
         let mut cfg = config.clone();
         cfg.compile_only = true;
+        cfg.mod_name = dep.name.clone();
+        cfg.prefix_symbols = true;
         let output = compile_module(dep, target.clone(), cfg)?;
         modules.extend(output);
     }
-    let codegen = CodeGen::new(module.name.clone(), target, config)?;
+    let codegen = CodeGen::new(target, config)?;
     modules.push(codegen.compile(module)?);
     Ok(modules)
 }
@@ -166,7 +168,12 @@ fn main() -> miette::Result<()> {
     tracing::subscriber::set_global_default(FmtSubscriber::builder().pretty().finish())
         .into_diagnostic()?;
 
-    let (module, errors) = parse_module_hierarchy(&args.file, &[".", "lib"]).into_diagnostic()?;
+    let (module, errors) = parse_module_hierarchy(
+        &args.file,
+        &[".", "lib"],
+        tbl_parser::types::Path::default(),
+    )
+    .into_diagnostic()?;
     if !errors.is_empty() {
         for e in errors {
             let mod_name = e.mod_path.display().to_string();
@@ -209,7 +216,9 @@ fn main() -> miette::Result<()> {
         .into_owned();
     let config = Config {
         is_debug: args.is_debug,
+        prefix_symbols: false,
         compile_only: args.compile_only,
+        mod_name: mod_name.clone(),
         filename: args.file.clone(),
     };
 

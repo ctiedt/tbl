@@ -1,0 +1,39 @@
+use std;
+
+struct Point {
+	x: u32,
+	y: u32
+}
+
+impl Point {
+	task new(x: u32, y: u32) -> Point {
+		let p: Point = {x: x, y: y};
+		return p;
+	}
+
+	// task x(&self) -> u32 {
+	// 	return (*self).x;
+	// }
+
+	task x(self: &Point) -> u32 {
+		return (*self).x;
+	}
+
+	task get_x(self: Point) -> u32 {
+		return self.x;
+	}
+
+	task set_x(self: Point, val: u32) {
+		self.x = val;
+	}
+}
+
+task main() {
+	let p: Point = Point::new(42, 42);
+	// printf("%d\n", p.x());
+	// let x: u32 = Point::x(&p);
+	let x: u32 = p.get_x();
+	printf("%d\n", x);
+	p.set_x(1);
+	printf("%d\n", p.x);
+}

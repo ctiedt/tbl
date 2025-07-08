@@ -61,11 +61,16 @@ impl<'a> Source<'a> {
 pub struct Parser<'a> {
     tokens: Vec<(Token<'a>, Span)>,
     cursor: usize,
+    prefix: types::Path,
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(tokens: Vec<(Token<'a>, Span)>) -> Self {
-        Self { tokens, cursor: 0 }
+    pub fn new(tokens: Vec<(Token<'a>, Span)>, prefix: types::Path) -> Self {
+        Self {
+            tokens,
+            cursor: 0,
+            prefix,
+        }
     }
 
     fn current(&self) -> Token<'a> {
@@ -215,6 +220,17 @@ impl<'a> Parser<'a> {
                 }
             }
 
+            match self.parse_impl() {
+                Ok(Some(t)) => {
+                    declarations.extend(t);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error.replace(e);
+                }
+            }
+
             if let Some(error) = error {
                 errors.push(error);
             }
@@ -305,7 +321,11 @@ impl<'a> Parser<'a> {
         self.require(Token::Semicolon)?;
 
         Ok(Some(
-            DeclarationKind::ExternGlobal { name, type_ }.with_span(start..end),
+            DeclarationKind::ExternGlobal {
+                path: name.into(),
+                type_,
+            }
+            .with_span(start..end),
         ))
     }
 
@@ -338,7 +358,12 @@ impl<'a> Parser<'a> {
         let end = self.current_span().end;
 
         Ok(Some(
-            DeclarationKind::Global { name, type_, value }.with_span(start..end),
+            DeclarationKind::Global {
+                path: name.into(),
+                type_,
+                value,
+            }
+            .with_span(start..end),
         ))
     }
 
@@ -359,7 +384,11 @@ impl<'a> Parser<'a> {
         }
 
         Ok(Some(
-            DeclarationKind::Struct { name, members }.with_span(start..end),
+            DeclarationKind::Struct {
+                path: name.into(),
+                members,
+            }
+            .with_span(start..end),
         ))
     }
 
@@ -400,6 +429,36 @@ impl<'a> Parser<'a> {
         Ok(Some((name, members)))
     }
 
+    fn parse_impl(&mut self) -> ParseResult<Vec<types::Declaration>> {
+        if self.accept(Token::Impl)?.is_none() {
+            return Ok(None);
+        }
+
+        let Expression {
+            kind: ExpressionKind::Path(ty),
+            ..
+        } = self
+            .parse_path()?
+            .ok_or(self.error(ParseErrorKind::ExpectedType))?
+        else {
+            unreachable!()
+        };
+
+        self.require(Token::CurlyOpen)?;
+
+        let mut tasks = vec![];
+
+        let ty_len = ty.len();
+        self.prefix.extend(ty);
+        while let Some(task) = self.parse_task()? {
+            tasks.push(task);
+        }
+        self.prefix.truncate(ty_len);
+
+        self.require(Token::CurlyClose)?;
+        Ok(Some(tasks))
+    }
+
     fn parse_extern_task(&mut self) -> ParseResult<types::Declaration> {
         let start = self.current_span().start;
         let mut returns = None;
@@ -428,7 +487,7 @@ impl<'a> Parser<'a> {
 
         Ok(Some(
             DeclarationKind::ExternTask {
-                name,
+                path: name.into(),
                 params,
                 returns,
             }
@@ -474,7 +533,7 @@ impl<'a> Parser<'a> {
 
         Ok(Some(
             DeclarationKind::Task {
-                name,
+                path: types::Path::from(name).prefixed(self.prefix.clone()),
                 params,
                 returns,
                 body,
@@ -502,6 +561,30 @@ impl<'a> Parser<'a> {
         } else {
             Err(self.error(ParseErrorKind::ExpectedIdent))
         }
+    }
+
+    fn parse_path(&mut self) -> ParseResult<Expression> {
+        let start = self.current_span().start;
+        let mut path = vec![];
+        let Some(ident) = self.accept(IdentPattern)? else {
+            return Ok(None);
+        };
+        path.push(ident.to_string());
+        loop {
+            if self.accept(Token::DoubleColon)?.is_some() {
+                let ident = self
+                    .accept(IdentPattern)?
+                    .ok_or(self.error(ParseErrorKind::ExpectedIdent))?
+                    .to_string();
+                path.push(ident);
+            } else {
+                break;
+            }
+        }
+        let end = self.current_span().end;
+        Ok(Some(
+            ExpressionKind::Path(types::Path::from_segments(path)).with_span(start..end),
+        ))
     }
 
     fn parse_external_params(&mut self) -> ParseResult<ExternTaskParams> {
@@ -600,7 +683,7 @@ impl<'a> Parser<'a> {
             return Ok(Some(Type::Integer { signed, width }));
         }
         if let Some(res) = self.accept(IdentPattern)? {
-            return Ok(Some(Type::Named(res.to_string())));
+            return Ok(Some(Type::Path(res.to_string().into())));
         }
         if self.accept(Token::And)?.is_some() {
             let inner = self
@@ -1005,11 +1088,28 @@ impl<'a> Parser<'a> {
                             .with_span(start..end);
                         }
                         PostfixOperator::Call { args } => {
-                            value = ExpressionKind::Call {
-                                task: Box::new(value),
-                                args,
+                            // This is where foo.bar() is desugared to bar(foo).
+                            // Need to figure out if this breaks anything...
+                            match value.kind {
+                                ExpressionKind::StructAccess { value: val, member } => {
+                                    value = ExpressionKind::MethodCall {
+                                        var: val,
+                                        task: Box::new(
+                                            ExpressionKind::Path(member.into())
+                                                .with_span(start..end),
+                                        ),
+                                        args,
+                                    }
+                                    .with_span(start..end);
+                                }
+                                _ => {
+                                    value = ExpressionKind::Call {
+                                        task: Box::new(value),
+                                        args,
+                                    }
+                                    .with_span(start..end);
+                                }
                             }
-                            .with_span(start..end);
                         }
                     }
                 }
@@ -1088,12 +1188,8 @@ impl<'a> Parser<'a> {
             let end = self.current_span().end;
             return Ok(Some(ExpressionKind::Literal(lit).with_span(start..end)));
         }
-        if let Some(n) = self.accept(IdentPattern)? {
-            let end = self.current_span().end;
-            let Token::Ident(val) = n else { unreachable!() };
-            return Ok(Some(
-                ExpressionKind::Var(val.to_string()).with_span(start..end),
-            ));
+        if let Some(p) = self.parse_path()? {
+            return Ok(Some(p));
         }
 
         Ok(None)
@@ -1261,22 +1357,29 @@ impl<'a> Parser<'a> {
         self.require(Token::CurlyClose)?;
         let end = self.current_span().end;
         Ok(Some(
-            DeclarationKind::Enum { name, variants }.with_span(start..end),
+            DeclarationKind::Enum {
+                path: name.into(),
+                variants,
+            }
+            .with_span(start..end),
         ))
     }
 }
 
-pub fn parse_path<'a, P: AsRef<Path>>(path: P) -> (Program, Vec<ParseError>) {
+pub fn parse_path<'a, P: AsRef<Path>, Q: Into<types::Path>>(
+    path: P,
+    prefix: Q,
+) -> (Program, Vec<ParseError>) {
     let path_str = path.as_ref().display().to_string();
     let contents = std::fs::read_to_string(path).unwrap();
     let source = Source {
         name: &path_str,
         contents: &contents,
     };
-    parse(source)
+    parse(source, prefix)
 }
 
-pub fn parse(source: Source<'_>) -> (Program, Vec<ParseError>) {
+pub fn parse<P: Into<types::Path>>(source: Source<'_>, prefix: P) -> (Program, Vec<ParseError>) {
     let lexer = Token::lexer(&source.contents);
     let tokens: Result<Vec<(Token<'_>, Span)>, ()> = lexer
         .spanned()
@@ -1285,7 +1388,7 @@ pub fn parse(source: Source<'_>) -> (Program, Vec<ParseError>) {
             Err(e) => Err(e),
         })
         .collect();
-    let mut parser = Parser::new(tokens.unwrap());
+    let mut parser = Parser::new(tokens.unwrap(), prefix.into());
     let (program, errors) = parser.parse();
     (program, errors)
 }

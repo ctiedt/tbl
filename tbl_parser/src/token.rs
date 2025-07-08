@@ -77,6 +77,15 @@ pub enum Token<'a> {
     #[token("once")]
     Once,
 
+    #[token("send")]
+    Send,
+
+    #[token("to")]
+    To,
+
+    #[token("impl")]
+    Impl,
+
     #[regex(r"([iu])(8|16|32|64)")]
     IntType(&'a str),
 
@@ -210,6 +219,9 @@ impl<'a> Display for Token<'a> {
                 Token::On => "on".to_string(),
                 Token::Do => "do".to_string(),
                 Token::Once => "once".to_string(),
+                Token::Send => "send".to_string(),
+                Token::To => "to".to_string(),
+                Token::Impl => "impl".to_string(),
                 Token::IntType(t) => t.to_string(),
                 Token::Ident(id) => id.to_string(),
                 Token::Varargs => "...".to_string(),

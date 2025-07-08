@@ -1,23 +1,93 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use tbl_analysis::{DiagnosticLevel, TblAnalyzer};
-use tbl_parser::module::parse_module_hierarchy;
-use tbl_parser::types::{DeclarationKind, Program};
+use tbl_parser::module::{parse_module_hierarchy, TblModule};
+use tbl_parser::types::{self, DeclarationKind, Program};
 use tbl_parser::Source;
+use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
     self, CompletionItem, CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
     DiagnosticOptions, DiagnosticServerCapabilities, DiagnosticSeverity,
-    DidChangeTextDocumentParams, DidSaveTextDocumentParams, DocumentDiagnosticParams,
-    DocumentDiagnosticReport, DocumentDiagnosticReportResult, FullDocumentDiagnosticReport, Hover,
-    HoverContents, HoverParams, HoverProviderCapability, InitializeResult, InitializedParams,
-    MarkedString, MessageType, OneOf, Position, Range, RelatedFullDocumentDiagnosticReport,
-    ServerCapabilities, ServerInfo, TextDocumentSyncKind, WorkDoneProgressOptions,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReport,
+    DocumentDiagnosticReportResult, FullDocumentDiagnosticReport, Hover, HoverContents,
+    HoverParams, HoverProviderCapability, InitializeResult, InitializedParams, MarkedString,
+    MessageType, OneOf, Position, Range, RelatedFullDocumentDiagnosticReport, ServerCapabilities,
+    ServerInfo, TextDocumentSyncKind, Url, WorkDoneProgressOptions,
 };
 use tower_lsp::LspService;
 use tower_lsp::{lsp_types::InitializeParams, Client, LanguageServer, Server};
 
 struct Backend {
     client: Client,
-    program: Program,
+    docs: Arc<RwLock<HashMap<Url, String>>>,
+}
+
+impl Backend {
+    fn validate(&self, source: Source) -> Vec<Diagnostic> {
+        let mut diagnostics = vec![];
+        let (prog, errors) = tbl_parser::parse(source, tbl_parser::types::Path::default());
+        // let (prog, _) = match parse_module_hierarchy(path, &[".", "lib"]) {
+        //     Ok(prog) => prog,
+        //     Err(e) => {
+        //         diagnostics.push(Diagnostic::new_simple(Range::default(), format!("{e:?}")));
+        //         return diagnostics;
+        //     }
+        // };
+        if !errors.is_empty() {
+            return errors
+                .into_iter()
+                .map(|e| Diagnostic::new_simple(Range::default(), format!("{e:?}")))
+                .collect();
+        }
+        //self.program = prog;
+
+        let analyzer = TblAnalyzer::new(TblModule::lsp_new(prog));
+
+        for diag in analyzer.analyze() {
+            let (start, end) = source.row_col(diag.span.clone());
+            let range = Range::new(
+                Position::new(start.line as u32, start.column as u32),
+                Position::new(end.line as u32, end.column as u32),
+            );
+            let severity = match diag.level {
+                DiagnosticLevel::Info => DiagnosticSeverity::INFORMATION,
+                DiagnosticLevel::Warning => DiagnosticSeverity::WARNING,
+                DiagnosticLevel::Error => DiagnosticSeverity::ERROR,
+            };
+            diagnostics.push(Diagnostic::new(
+                range,
+                Some(severity),
+                None,
+                None,
+                diag.message,
+                None,
+                None,
+            ));
+        }
+
+        for error in errors {
+            let (start, end) = source.row_col(error.span.clone());
+            let range = Range::new(
+                Position::new(start.line as u32, start.column as u32),
+                Position::new(end.line as u32, end.column as u32),
+            );
+            let message = format!("{:?}", error);
+            diagnostics.push(Diagnostic::new(
+                range,
+                Some(DiagnosticSeverity::ERROR),
+                None,
+                None,
+                message,
+                None,
+                None,
+            ));
+        }
+
+        diagnostics
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -68,66 +138,7 @@ impl LanguageServer for Backend {
             name: path,
             contents: &params.content_changes[0].text,
         };
-        let (_, errors) = tbl_parser::parse(source);
-        let (prog, _) = match parse_module_hierarchy(path, &[".", "lib"]) {
-            Ok(prog) => prog,
-            Err(e) => {
-                self.client
-                    .publish_diagnostics(
-                        params.text_document.uri,
-                        vec![Diagnostic::new_simple(Range::default(), format!("{e:?}"))],
-                        None,
-                    )
-                    .await;
-                return;
-            }
-        };
-        //self.program = prog;
-
-        let analyzer = TblAnalyzer::new(prog);
-
-        let mut diagnostics = vec![];
-
-        for diag in analyzer.analyze() {
-            let (start, end) = source.row_col(diag.span.clone());
-            let range = Range::new(
-                Position::new(start.line as u32, start.column as u32),
-                Position::new(end.line as u32, end.column as u32),
-            );
-            let severity = match diag.level {
-                DiagnosticLevel::Info => DiagnosticSeverity::INFORMATION,
-                DiagnosticLevel::Warning => DiagnosticSeverity::WARNING,
-                DiagnosticLevel::Error => DiagnosticSeverity::ERROR,
-            };
-            diagnostics.push(Diagnostic::new(
-                range,
-                Some(severity),
-                None,
-                None,
-                diag.message,
-                None,
-                None,
-            ));
-        }
-
-        for error in errors {
-            let (start, end) = source.row_col(error.span.clone());
-            let range = Range::new(
-                Position::new(start.line as u32, start.column as u32),
-                Position::new(end.line as u32, end.column as u32),
-            );
-            let message = format!("{:?}", error);
-            diagnostics.push(Diagnostic::new(
-                range,
-                Some(DiagnosticSeverity::ERROR),
-                None,
-                None,
-                message,
-                None,
-                None,
-            ));
-        }
-
+        let diagnostics = self.validate(source);
         self.client
             .publish_diagnostics(params.text_document.uri, diagnostics, None)
             .await;
@@ -148,7 +159,7 @@ impl LanguageServer for Backend {
             )
             .await;
 
-        let (program, _) = tbl_parser::parse_path(path);
+        let (program, _) = tbl_parser::parse_path(path, types::Path::default());
         let mut completions = vec![
             CompletionItem::new_simple("schedule".to_string(), "schedule".to_string()),
             CompletionItem::new_simple("task".to_string(), "task".to_string()),
@@ -157,32 +168,32 @@ impl LanguageServer for Backend {
             let kind = &decl.kind;
             match kind {
                 DeclarationKind::Task {
-                    name,
+                    path,
                     params,
                     returns,
                     ..
                 } => completions.push(CompletionItem::new_simple(
-                    name.clone(),
-                    format!("task {name}()"),
+                    path.to_string(),
+                    format!("task {path}()"),
                 )),
                 DeclarationKind::ExternTask {
-                    name,
+                    path,
                     params,
                     returns,
                 } => completions.push(CompletionItem::new_simple(
-                    name.clone(),
-                    format!("task {name}()"),
+                    path.to_string(),
+                    format!("task {path}()"),
                 )),
-                DeclarationKind::Global { name, type_, .. } => {
+                DeclarationKind::Global { path, type_, .. } => {
                     completions.push(CompletionItem::new_simple(
-                        name.clone(),
-                        format!("global {name}: {}", type_.name()),
+                        path.to_string(),
+                        format!("global {path}: {}", type_.name()),
                     ))
                 }
-                DeclarationKind::ExternGlobal { name, type_ } => {
+                DeclarationKind::ExternGlobal { path, type_ } => {
                     completions.push(CompletionItem::new_simple(
-                        name.clone(),
-                        format!("global {name}: {}", type_.name()),
+                        path.to_string(),
+                        format!("global {path}: {}", type_.name()),
                     ))
                 }
                 _ => {}
@@ -196,6 +207,17 @@ impl LanguageServer for Backend {
             contents: HoverContents::Scalar(MarkedString::String("You're hovering!".to_string())),
             range: None,
         }))
+    }
+
+    async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        let uri = params.text_document.uri;
+        let text = params.text_document.text;
+        self.docs.write().await.insert(uri, text);
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let uri = params.text_document.uri;
+        self.docs.write().await.remove(&uri);
     }
 
     async fn diagnostic(
@@ -213,7 +235,7 @@ impl LanguageServer for Backend {
             contents: &contents,
         };
 
-        let (_, errors) = tbl_parser::parse_path(path);
+        let (_, errors) = tbl_parser::parse_path(path, types::Path::default());
 
         let mut diagnostics = vec![];
 
@@ -246,9 +268,7 @@ async fn main() {
 
     let (service, socket) = LspService::new(|client| Backend {
         client,
-        program: Program {
-            declarations: vec![],
-        },
+        docs: Arc::new(RwLock::new(HashMap::new())),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

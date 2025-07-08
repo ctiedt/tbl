@@ -100,6 +100,15 @@ void sched_run() {
     exit(-1);
   }
 
-  while (1)
-    ;
+  while (1) {
+    int any_running = 0;
+    for (int i = 0; i < TASK_IDX; i++) {
+      if (TASKS[i].tcb.state != TASK_EXITED) {
+        any_running = 1;
+      }
+    }
+    if (!any_running) {
+      exit(0);
+    }
+  }
 }
